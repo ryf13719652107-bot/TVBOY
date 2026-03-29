@@ -1,0 +1,1905 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TV → 币安 控制台</title>
+  <style>
+    :root {
+      --bg: #f0f2f5;
+      --card: #ffffff;
+      --border: #d8dee6;
+      --text: #1a2332;
+      --muted: #5c6b7a;
+      --accent: #0284c7;
+      --ok: #059669;
+      --err: #dc2626;
+      --input-bg: #ffffff;
+      --elevated: #f8fafc;
+      --table-header: #eef2f7;
+      --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+      --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    @media (min-width: 1024px) {
+      .wrap {
+        max-width: min(1240px, calc(100vw - 2.5rem));
+        padding: 1.5rem 1.25rem 3rem;
+      }
+    }
+    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .grid { display: grid; gap: 1rem; }
+    @media (min-width: 640px) {
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    code {
+      background: var(--elevated);
+      padding: 0.12rem 0.35rem;
+      border-radius: 4px;
+      font-size: 0.88em;
+      border: 1px solid var(--border);
+    }
+    .card h2 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+      font-weight: 600;
+    }
+    .stat { font-size: 0.95rem; }
+    .stat span { color: var(--muted); display: inline-block; min-width: 7rem; }
+    .pill {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .pill.on { background: rgba(5, 150, 105, 0.12); color: var(--ok); }
+    .pill.off { background: rgba(220, 38, 38, 0.1); color: var(--err); }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
+    input, select, textarea {
+      width: 100%;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--input-bg);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    textarea { font-family: var(--mono); font-size: 0.8rem; min-height: 88px; resize: vertical; }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.2);
+    }
+    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+    .row > * { flex: 1; min-width: 120px; }
+    button {
+      cursor: pointer;
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      border: none;
+      font-weight: 600;
+      font-size: 0.9rem;
+      font-family: inherit;
+      background: linear-gradient(180deg, #0ea5e9, #0284c7);
+      color: #fff;
+    }
+    button:hover { filter: brightness(1.06); }
+    button.secondary {
+      background: #e2e8f0;
+      color: var(--text);
+      border: 1px solid #cbd5e1;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+    .out {
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      background: var(--elevated);
+      border: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 280px;
+      overflow: auto;
+      color: var(--text);
+    }
+    .out.err { border-color: rgba(220, 38, 38, 0.45); color: #b91c1c; background: #fef2f2; }
+    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+    .copy-row { display: flex; gap: 0.5rem; align-items: stretch; }
+    .copy-row textarea { flex: 1; min-height: 72px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .balance-plain {
+      margin-top: 0.75rem;
+      padding: 1rem 1.1rem;
+      border-radius: 8px;
+      background: #f0f9ff;
+      border: 1px solid #bae6fd;
+      border-left-width: 4px;
+      border-left-color: var(--accent);
+      font-size: 0.95rem;
+      line-height: 1.65;
+      min-height: 3rem;
+    }
+    .balance-plain strong { color: var(--accent); }
+    .balance-plain .row-line { margin: 0.35rem 0; }
+    .balance-plain .num {
+      font-family: var(--mono);
+      color: var(--text);
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+    .balance-raw-title { font-size: 0.75rem; color: var(--muted); margin-top: 0.75rem; margin-bottom: 0.25rem; }
+    .btn-link {
+      background: none;
+      border: none;
+      color: var(--accent);
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 0.25rem 0;
+      text-decoration: underline;
+    }
+    .btn-link:hover { filter: brightness(1.1); }
+    .table-wrap {
+      margin-top: 0.75rem;
+      overflow-x: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      max-height: 420px;
+      overflow-y: auto;
+    }
+    table.siglog {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.72rem;
+      font-family: var(--mono);
+    }
+    table.siglog th, table.siglog td {
+      padding: 0.4rem 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    table.siglog th {
+      position: sticky;
+      top: 0;
+      background: var(--table-header);
+      color: var(--muted);
+      font-weight: 600;
+      z-index: 1;
+      box-shadow: 0 1px 0 var(--border);
+    }
+    table.siglog tr:last-child td { border-bottom: none; }
+    table.siglog .ok { color: var(--ok); }
+    table.siglog .bad { color: var(--err); }
+    #accountLogWrap.table-wrap {
+      max-height: 420px;
+    }
+    @media (min-width: 1024px) {
+      #accountLogWrap.table-wrap {
+        max-height: min(72vh, 800px);
+      }
+      table.siglog-account-log {
+        font-size: 0.8125rem;
+        table-layout: fixed;
+      }
+      table.siglog-account-log th,
+      table.siglog-account-log td {
+        padding: 0.5rem 0.65rem;
+        vertical-align: middle;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      table.siglog-account-log col.acol-time { width: 10.5rem; }
+      table.siglog-account-log col.acol-account { width: 7rem; }
+      table.siglog-account-log col.acol-src { width: 3.5rem; }
+      table.siglog-account-log col.acol-result { width: 5rem; }
+      table.siglog-account-log col.acol-action { width: 7rem; }
+      table.siglog-account-log col.acol-sym { width: 12rem; }
+      table.siglog-account-log col.acol-q { width: 5.5rem; }
+      table.siglog-account-log col.acol-lat { width: 14rem; }
+      table.siglog-account-log col.acol-det { width: auto; }
+      table.siglog-account-log .cell-time { white-space: nowrap; }
+      table.siglog-account-log .cell-lat {
+        font-size: 0.78rem;
+        line-height: 1.4;
+      }
+      table.siglog-account-log .cell-det {
+        font-size: 0.78rem;
+        font-family: var(--mono);
+      }
+    }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+    }
+    .tab-btn {
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-family: inherit;
+    }
+    .tab-btn:hover { color: var(--text); border-color: #94a3b8; }
+    .tab-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: #e0f2fe;
+    }
+    .tab-panel { display: none; margin-bottom: 0.5rem; }
+    .tab-panel.active { display: block; }
+    .health-strip {
+      margin-top: 0.75rem;
+      padding: 0.6rem 0.85rem;
+      border-radius: 8px;
+      background: var(--elevated);
+      border: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .health-strip strong { color: var(--text); }
+    /* 交易所成交表（贴近币安合约成交列表） */
+    .table-exchange-wrap {
+      margin-top: 0.75rem;
+      overflow: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      max-height: 560px;
+    }
+    table.table-exchange {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+      font-family: var(--font);
+    }
+    table.table-exchange th,
+    table.table-exchange td {
+      padding: 0.6rem 0.55rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    table.table-exchange th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--table-header);
+      color: var(--text);
+      font-weight: 600;
+      white-space: nowrap;
+      box-shadow: 0 1px 0 var(--border);
+    }
+    table.table-exchange tbody tr:last-child td {
+      border-bottom: none;
+    }
+    table.table-exchange td.mono {
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+    }
+    .trade-badge {
+      display: inline-block;
+      min-width: 1.4rem;
+      text-align: center;
+      padding: 0.1rem 0.32rem;
+      border-radius: 4px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: #fff;
+      margin-right: 0.4rem;
+      vertical-align: middle;
+    }
+    .trade-badge.buy { background: #22c55e; }
+    .trade-badge.sell { background: #ef4444; }
+    .pnl-up { color: #22c55e; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .pnl-down { color: #ef4444; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>TradingView → 币安</h1>
+    <p class="sub">多账户跟单 · 固定名义 · 按账户查看运行日志</p>
+
+    <nav class="tabs" role="tablist" aria-label="主菜单">
+      <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
+      <button type="button" class="tab-btn" data-tab="accounts" role="tab" aria-selected="false">交易账户</button>
+      <button type="button" class="tab-btn" data-tab="balance" role="tab" aria-selected="false">余额与试单</button>
+      <button type="button" class="tab-btn" data-tab="logs" role="tab" aria-selected="false">运行日志</button>
+      <button type="button" class="tab-btn" data-tab="trades" role="tab" aria-selected="false">交易记录</button>
+      <button type="button" class="tab-btn" data-tab="tv" role="tab" aria-selected="false">TradingView</button>
+    </nav>
+
+    <div id="panel-overview" class="tab-panel active" role="tabpanel">
+    <div class="grid grid-2" style="margin-bottom: 1rem;">
+      <div class="card">
+        <h2>运行状态</h2>
+        <div id="statusBox" class="stat">加载中…</div>
+      </div>
+      <div class="card">
+        <h2>访问密钥</h2>
+        <label for="secret">与 <code>.env</code> 中 <strong>DASHBOARD_SECRET</strong> 或 <strong>TV_WEBHOOK_SECRET</strong> 一致（仅存浏览器）</label>
+        <input id="secret" type="password" autocomplete="off" placeholder="保存密钥后使用各页功能" />
+        <div class="row" style="margin-top: 0.5rem;">
+          <button type="button" class="secondary" id="btnSaveSecret">保存密钥</button>
+          <button type="button" class="secondary" id="btnClearSecret">清除</button>
+        </div>
+        <p class="hint">首次使用：在 <code>python量化/.env</code> 配置 <code>DASHBOARD_SECRET</code> 后重启服务。</p>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>开仓后止损（合约）</h2>
+      <p class="hint" style="margin-top: 0;">开启后，每次<strong>非仅减仓</strong>的市价成交完毕，会按成交数量挂止损单（优先 STOP 限价触发，失败则 STOP_MARKET）。<strong>所有账户</strong>在各自 API 上独立挂单。仅 <code>BINANCE_DEFAULT_TYPE=future</code> 时生效。</p>
+      <div class="row" style="margin-top: 0.5rem; align-items: center;">
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;margin-top:1.25rem;">
+          <input type="checkbox" id="stopLossEnabled" /> 开启止损挂单
+        </label>
+        <div>
+          <label for="stopLossPct">止损幅度（相对开仓均价 %）</label>
+          <input type="number" id="stopLossPct" min="0.01" max="50" step="0.01" value="3.33" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnSaveBotSettings" disabled>保存止损设置</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-top: 0.5rem;">默认 3.33%；设置保存在服务器 <code>data/bot_settings.json</code>。平仓/减仓（<code>reduce_only</code>）不会挂止损；全平后服务端会按<strong>交易所持仓是否已空</strong>自动撤未触发止损（无需改 Pine）。</p>
+    </div>
+    <p id="healthLine" class="health-strip">近 24 小时失败次数：—（保存密钥并打开「运行日志」后更新）</p>
+    </div>
+
+    <div id="panel-accounts" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>交易账户</h2>
+      <p class="hint" style="margin-top: 0;">每个账户单独<strong>固定 USDT</strong>；勾选 Webhook 的账户会跟 TV 信号下单。TV 内 <code>quote_amount</code> 不参与名义计算；余额变化不改变该固定值。</p>
+      <p class="hint" id="accountsHint" style="margin-top: 0.35rem;">请先填写并保存「访问密钥」。</p>
+      <div class="table-wrap" id="accountsTableWrap" style="display: none; max-height: none;">
+        <table class="siglog" id="accountsTable" style="font-size: 0.78rem;">
+          <thead>
+            <tr>
+              <th>备注</th>
+              <th>交易所</th>
+              <th>API Key</th>
+              <th>Secret</th>
+              <th>固定USDT</th>
+              <th>启用</th>
+              <th>Webhook</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="accountsTableBody"></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <button type="button" class="secondary" id="btnAddAccount" disabled>添加账户</button>
+        <button type="button" id="btnSaveAccounts" disabled>保存全部</button>
+        <button type="button" class="secondary" id="btnReloadAccounts" disabled>重新加载</button>
+      </div>
+    </div>
+    </div>
+
+    <div id="panel-balance" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>USDT 余额</h2>
+      <p class="hint" style="margin-top: 0;">选「全部账户」时<strong>下方展示每个账户</strong>的合约/现货 USDT；选单个账户只查该户。进入本页或切换下拉时会<strong>自动查询</strong>。</p>
+      <div class="row" style="margin-bottom: 0.65rem;">
+        <div>
+          <label for="accountSelectBalance">账户</label>
+          <select id="accountSelectBalance">
+            <option value="">全部账户</option>
+          </select>
+        </div>
+      </div>
+      <button type="button" id="btnBalance" disabled>刷新余额</button>
+      <div id="balancePlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
+      <p style="margin: 0.5rem 0 0; display: none;" id="balanceToggleWrap">
+        <button type="button" class="btn-link" id="btnToggleRawJson">显示原始 JSON</button>
+      </p>
+      <p class="balance-raw-title" id="balanceRawTitle" style="display: none;">接口原始 JSON</p>
+      <div id="outBalance" class="out" style="display: none;"></div>
+    </div>
+
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>手动测试下单</h2>
+      <div class="row">
+        <div>
+          <label for="accountSelectOrder">交易账户</label>
+          <select id="accountSelectOrder"></select>
+        </div>
+        <div>
+          <label for="sym">交易对 symbol</label>
+          <input id="sym" value="BTCUSDT" placeholder="如 BTCUSDT" />
+        </div>
+        <div>
+          <label for="side">方向</label>
+          <select id="side">
+            <option value="buy">buy</option>
+            <option value="sell">sell</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="mode">数量方式</label>
+          <select id="mode">
+            <option value="quote">按账户固定 USDT 名义</option>
+            <option value="amount">按基础币数量 (amount)</option>
+          </select>
+        </div>
+        <div>
+          <label for="qty">基础币数量（仅选 amount 时有效）</label>
+          <input id="qty" type="text" value="20" />
+        </div>
+        <div>
+          <label for="reduce">合约仅减仓</label>
+          <select id="reduce">
+            <option value="no">否</option>
+            <option value="yes">是 (reduce_only)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.75rem;">
+        <button type="button" id="btnOrder" disabled>发送市价单（真实下单）</button>
+      </div>
+      <p class="hint">选「按账户固定 USDT」时，名义以该账户在「交易账户」里填的<strong>固定 USDT</strong>为准。请先用测试网或小金额验证；合约需满足交易所最低名义。</p>
+      <div id="orderPlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
+      <p style="margin: 0.5rem 0 0; display: none;" id="orderToggleWrap">
+        <button type="button" class="btn-link" id="btnToggleOrderRaw">显示完整返回</button>
+      </p>
+      <p class="balance-raw-title" id="orderRawTitle" style="display: none;">完整 JSON</p>
+      <div id="outOrder" class="out" style="display: none;"></div>
+    </div>
+    </div>
+
+    <div id="panel-logs" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>运行日志</h2>
+      <p class="hint" style="margin-top: 0;">机器人执行记录（Webhook / 手动试单）保存在服务器 <code>data/execution_log.json</code>，<strong>不自动删除</strong>。</p>
+      <div class="row" style="margin-top: 0.5rem;">
+        <div>
+          <label for="accountLogFilter">筛选账户</label>
+          <select id="accountLogFilter">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnAccountLog" disabled>刷新</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnAccountLogDeleteFiltered" disabled>删除当前账户记录</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnAccountLogDeleteAll" disabled>清空全部执行记录</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
+          <input type="checkbox" id="accountLogTzBeijing" checked /> 时间显示为北京时间
+        </label>
+      </div>
+      <p class="hint" style="margin-top:0.35rem;font-size:0.78rem;">Webhook 聚合信号另存 <code>data/signal_log.json</code>。</p>
+      <div class="row" style="margin-top: 0.35rem;">
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnSignalLogClear" disabled>清空 Webhook 聚合记录</button>
+        </div>
+      </div>
+      <p id="accountLogHint" class="hint" style="margin-top: 0.5rem;"></p>
+      <div class="table-wrap" id="accountLogWrap" style="display: none;">
+        <table class="siglog siglog-account-log" aria-label="运行日志">
+          <colgroup>
+            <col class="acol-time" />
+            <col class="acol-account" />
+            <col class="acol-src" />
+            <col class="acol-result" />
+            <col class="acol-action" />
+            <col class="acol-sym" />
+            <col class="acol-q" />
+            <col class="acol-lat" />
+            <col class="acol-det" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>账户</th>
+              <th>来源</th>
+              <th>结果</th>
+              <th>动作</th>
+              <th>品种/方向</th>
+              <th>名义USDT</th>
+              <th>耗时（接受 / 执行 / 总计）</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody id="accountLogBody"></tbody>
+        </table>
+      </div>
+    </div>
+    </div>
+
+    <div id="panel-trades" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>交易记录</h2>
+      <p class="hint" style="margin-top: 0;">仅展示<strong>本机器人</strong>产生的执行记录（Webhook / 控制台试单），数据来自 <code>data/execution_log.json</code>。<strong>仅合约</strong>（<code>BINANCE_DEFAULT_TYPE=future</code> 时与现货无关）；不含交易所里手动下的单。</p>
+      <div class="row" style="margin-top: 0.5rem;">
+        <div>
+          <label for="accountSelectTradeService">账户</label>
+          <select id="accountSelectTradeService">
+            <option value="">全部</option>
+          </select>
+        </div>
+        <div>
+          <label for="exchangeTradesSymbol">交易对筛选</label>
+          <input type="text" id="exchangeTradesSymbol" placeholder="留空=全部；可选 ETHUSDT" value="" autocomplete="off" />
+        </div>
+        <div>
+          <label for="exchangeTradesLimit">条数</label>
+          <select id="exchangeTradesLimit">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnTradeServiceRefresh" disabled>刷新</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnTradeDeleteFiltered" disabled>删除当前账户记录</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="button" class="secondary" id="btnTradeDeleteAll" disabled>清空全部执行记录</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
+          <input type="checkbox" id="tradeTzBeijing" checked /> 时间显示为北京时间
+        </label>
+      </div>
+      <p id="tradeServiceHint" class="hint" style="margin-top: 0.5rem;"></p>
+      <div class="table-exchange-wrap" id="tradeServiceWrap" style="display: none;">
+        <table class="table-exchange" aria-label="机器人合约执行记录">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>来源</th>
+              <th>交易对</th>
+              <th>成交价</th>
+              <th>数量</th>
+              <th>手续费</th>
+              <th>收益(USDT)</th>
+              <th>成交时间</th>
+            </tr>
+          </thead>
+          <tbody id="tradeServiceBody"></tbody>
+        </table>
+      </div>
+    </div>
+    </div>
+
+    <div id="panel-tv" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2>TradingView 与模拟 Webhook</h2>
+      <p class="hint" style="margin-top: 0;">告警 URL：<code id="webhookHint">https://你的域名/webhook</code>（Header <code>X-TV-Secret</code> 与 .env 一致）。以下为与 TV 相同格式的测试请求，会真实下单。</p>
+      <label for="webhookTestBody">消息体 JSON</label>
+      <textarea id="webhookTestBody" style="min-height: 88px;">{"action":"buy","symbol":"ETHUSDT","quote_amount":1000}</textarea>
+      <div class="row" style="margin-top: 0.65rem;">
+        <button type="button" id="btnWebhookTest" disabled>发送模拟 Webhook</button>
+      </div>
+      <div id="webhookTestPlain" class="balance-plain" style="display: none; margin-top: 0.75rem;"></div>
+      <div id="outWebhookTest" class="out" style="display: none; margin-top: 0.5rem;"></div>
+      <p class="balance-raw-title" style="margin-top: 1rem;">TV 策略告警消息（自动推断开/加/减/平）</p>
+      <p class="hint" style="margin-top: 0;">在策略的「告警」里使用下方 JSON（须为<strong>合法 JSON</strong>）。本服务会读 <code>action</code>（或 <code>strategy.order.action</code>）与 <code>prev_market_position</code>：在 <strong>合约（BINANCE_DEFAULT_TYPE=future）</strong> 下，若上一笔为多头且本次为 <code>sell</code> 则自动下<strong>仅减仓</strong>；上一笔为空头且本次为 <code>buy</code> 同理。开多/加多、开空/加空为<strong>非仅减仓</strong>。若消息里<strong>显式写了</strong> <code>reduce_only</code>，则以你写的为准。多账户名义仍由各账户「固定 USDT」决定，不必写 <code>quote_amount</code>。</p>
+      <p class="hint" style="margin-top: 0.35rem;">勿在 JSON 里写 <code>{{price}}*0.95</code> 这类非法表达式；你举的第三方模板若含此类字段，需删掉或改成 TV 能展开的数字，否则整段无法解析。</p>
+      <p class="hint" style="margin-top: 0.35rem;">全平后撤销止损：仅减仓成交后服务端会<strong>查询币安该合约持仓</strong>，若已空仓则自动取消未触发的止损挂单，<strong>不必改 Pine 策略</strong>；若告警里带有 <code>market_position</code>=flat 等字段也会作为辅助判断。</p>
+      <div class="copy-row">
+        <textarea id="tplTvStrategyWebhook" readonly style="min-height: 140px; font-size: 0.78rem;">{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "symbol": "{{ticker}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "market_position": "{{strategy.market_position}}",
+  "position_size": "{{strategy.position_size}}",
+  "contracts": "{{strategy.order.contracts}}"
+}</textarea>
+      </div>
+      <div class="row" style="margin-top: 0.5rem;">
+        <button type="button" class="secondary" id="btnCopyTvStrategyWebhook">复制告警 JSON</button>
+      </div>
+    </div>
+    </div>
+
+  </div>
+
+  <script>
+    const KEY = "tv_binance_dashboard_secret";
+    const secretEl = document.getElementById("secret");
+    const statusBox = document.getElementById("statusBox");
+    const btnBalance = document.getElementById("btnBalance");
+    const btnOrder = document.getElementById("btnOrder");
+    const btnWebhookTest = document.getElementById("btnWebhookTest");
+    const btnAccountLog = document.getElementById("btnAccountLog");
+    const btnTradeServiceRefresh = document.getElementById("btnTradeServiceRefresh");
+    const accountLogBody = document.getElementById("accountLogBody");
+    const accountLogWrap = document.getElementById("accountLogWrap");
+    const accountLogHint = document.getElementById("accountLogHint");
+    const accountLogTzBeijing = document.getElementById("accountLogTzBeijing");
+    const healthLine = document.getElementById("healthLine");
+    const btnSaveAccounts = document.getElementById("btnSaveAccounts");
+    const btnAddAccount = document.getElementById("btnAddAccount");
+    const btnReloadAccounts = document.getElementById("btnReloadAccounts");
+    const accountsTableWrap = document.getElementById("accountsTableWrap");
+    const accountsHint = document.getElementById("accountsHint");
+    let accountsState = [];
+    let dashboardRole = null; // admin | viewer | null
+    const outBalance = document.getElementById("outBalance");
+    const balancePlain = document.getElementById("balancePlain");
+    const balanceRawTitle = document.getElementById("balanceRawTitle");
+    const balanceToggleWrap = document.getElementById("balanceToggleWrap");
+    const btnToggleRawJson = document.getElementById("btnToggleRawJson");
+    const outOrder = document.getElementById("outOrder");
+    const orderPlain = document.getElementById("orderPlain");
+    const orderToggleWrap = document.getElementById("orderToggleWrap");
+    const orderRawTitle = document.getElementById("orderRawTitle");
+    const btnToggleOrderRaw = document.getElementById("btnToggleOrderRaw");
+    let balanceRawVisible = false;
+    let orderRawVisible = false;
+
+    function fmtU(n) {
+      if (n === null || n === undefined || typeof n === "object") return "—";
+      const x = Number(n);
+      if (Number.isNaN(x)) return "—";
+      return x.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+    }
+
+    function fmtTimeFromMs(ms, useBeijing) {
+      if (ms == null || ms === "") return "—";
+      const n = Number(ms);
+      if (Number.isNaN(n)) return "—";
+      const d = new Date(n);
+      if (useBeijing) {
+        return d.toLocaleString("zh-CN", {
+          timeZone: "Asia/Shanghai",
+          hour12: false,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+      return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+    }
+
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function formatExecutionLatency(row) {
+      if (
+        row.receive_signal_ms != null &&
+        row.execute_trade_ms != null &&
+        row.total_trade_ms != null
+      ) {
+        return (
+          "接受信号 " +
+          row.receive_signal_ms +
+          " ms · 执行交易 " +
+          row.execute_trade_ms +
+          " ms · 总计 " +
+          row.total_trade_ms +
+          " ms"
+        );
+      }
+      const totalLegacy =
+        row.total_trade_ms != null ? row.total_trade_ms : row.server_latency_ms;
+      if (totalLegacy != null && row.receive_signal_ms == null) {
+        return (
+          "接受信号 — ms · 执行交易 — ms · 总计 " +
+          totalLegacy +
+          " ms（升级前保存；重启机器人并发新 Webhook 后显示分项）"
+        );
+      }
+      return "—";
+    }
+
+    function renderAccountLogTable(items, hintText, failures24h, options) {
+      const opts = options || {};
+      const body = opts.bodyEl || accountLogBody;
+      const wrap = opts.wrapEl || accountLogWrap;
+      const hint = opts.hintEl || accountLogHint;
+      const tzEl = opts.tzEl || accountLogTzBeijing;
+      const skipHealth = opts.skipHealth;
+      if (!body || !wrap || !hint) return;
+      const useBj = tzEl && tzEl.checked;
+      hint.textContent = hintText || "";
+      if (!skipHealth && healthLine && typeof failures24h === "number") {
+        healthLine.innerHTML =
+          `近 24 小时失败次数：<strong>${failures24h}</strong> · 执行记录持久化保存`;
+      }
+      if (!items || items.length === 0) {
+        wrap.style.display = "none";
+        body.innerHTML = "";
+        return;
+      }
+      wrap.style.display = "block";
+      const rows = items.map((row) => {
+        const ok = row.ok;
+        const st = ok
+          ? '<span class="ok">成功</span>'
+          : '<span class="bad">失败</span>';
+        const tcell = fmtTimeFromMs(row.ts_ms, useBj);
+        const src = row.source === "webhook" ? "TV" : "手动";
+        const sym = [row.symbol, row.side].filter(Boolean).join(" ");
+        const act = row.action
+          ? escHtml(String(row.action))
+          : "—";
+        const q = row.quote_usdt != null ? fmtU(row.quote_usdt) : "—";
+        const lat = formatExecutionLatency(row);
+        const det = row.error
+          ? escHtml(String(row.error).slice(0, 200))
+          : row.order_id
+            ? "#" + escHtml(String(row.order_id))
+            : "—";
+        return (
+          `<tr><td class="cell-time">${escHtml(tcell)}</td><td class="cell-account">${escHtml(String(row.remark || row.account_id || ""))}</td>` +
+          `<td class="cell-src">${escHtml(src)}</td><td class="cell-result">${st}</td><td class="cell-action">${act}</td><td class="cell-sym">${escHtml(sym || "—")}</td>` +
+          `<td class="cell-q">${escHtml(q)}</td><td class="cell-lat">${escHtml(lat)}</td>` +
+          `<td class="cell-det">${det}</td></tr>`
+        );
+      });
+      body.innerHTML = rows.join("");
+    }
+
+    async function loadAccountLog() {
+      if (!getSecret()) {
+        if (accountLogHint) accountLogHint.textContent = "请先保存访问密钥。";
+        if (accountLogWrap) accountLogWrap.style.display = "none";
+        return;
+      }
+      if (accountLogHint) accountLogHint.textContent = "加载中…";
+      const aid = document.getElementById("accountLogFilter")?.value || "";
+      try {
+        const qs = new URLSearchParams();
+        if (aid) qs.set("account_id", aid);
+        qs.set("limit", "50000");
+        const r = await fetch("/api/account-log?" + qs.toString(), {
+          headers: { "X-TV-Secret": getSecret() },
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          if (accountLogHint) accountLogHint.textContent = "加载失败：" + (d.error || t);
+          renderAccountLogTable([], "", null);
+          return;
+        }
+        const hint =
+          (d.hint ? d.hint + " " : "") +
+          "本页展示 " +
+          (d.items && d.items.length) +
+          " 条；库中合计 " +
+          (d.total_stored != null ? d.total_stored : "—") +
+          " 条。可按账户筛选。";
+        renderAccountLogTable(d.items || [], hint, d.failures_24h);
+      } catch (e) {
+        if (accountLogHint) accountLogHint.textContent = "请求失败：" + String(e);
+        renderAccountLogTable([], "", null);
+      }
+    }
+
+    function fmtTimeExchangeMs(ms, useBj) {
+      if (ms == null || ms === "") return "—";
+      const n = Number(ms);
+      if (Number.isNaN(n)) return "—";
+      const d = new Date(n);
+      if (useBj) {
+        return d
+          .toLocaleString("sv-SE", { timeZone: "Asia/Shanghai" })
+          .replace("T", " ");
+      }
+      return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "");
+    }
+
+    function fmtTradeDecimal(n, maxDigits) {
+      if (n == null || n === "") return "—";
+      const x = Number(n);
+      if (Number.isNaN(x)) return "—";
+      return x.toLocaleString("zh-CN", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: maxDigits != null ? maxDigits : 8,
+      });
+    }
+
+    function displaySymbolCompact(sym) {
+      if (sym == null || sym === "") return "";
+      let s = String(sym).replace(/\//g, "");
+      if (s.endsWith(":USDT")) s = s.slice(0, -5);
+      if (s.endsWith(":USDC")) s = s.slice(0, -5);
+      return s.toUpperCase();
+    }
+
+    function renderExchangeTradesTable(items, hintText) {
+      const body = document.getElementById("tradeServiceBody");
+      const wrap = document.getElementById("tradeServiceWrap");
+      const hint = document.getElementById("tradeServiceHint");
+      const tzEl = document.getElementById("tradeTzBeijing");
+      const useBj = tzEl && tzEl.checked;
+      if (hint) hint.textContent = hintText || "";
+      if (!body || !wrap) return;
+      if (!items || items.length === 0) {
+        wrap.style.display = "none";
+        body.innerHTML = "";
+        return;
+      }
+      wrap.style.display = "block";
+      const rows = items.map((row) => {
+        const side = String(row.side || "").toLowerCase();
+        const badge =
+          side === "buy"
+            ? '<span class="trade-badge buy">买</span>'
+            : '<span class="trade-badge sell">卖</span>';
+        const symDisp = displaySymbolCompact(row.symbol);
+        const pairCell =
+          badge +
+          '<span class="mono">' +
+          escHtml(symDisp || String(row.symbol || "")) +
+          "</span>";
+        const src = row.source === "webhook" ? "TV" : "手动";
+        const oid = row.order_id ? String(row.order_id) : "—";
+        const tms = row.exchange_timestamp_ms != null ? row.exchange_timestamp_ms : row.ts_ms;
+        const tcell = fmtTimeExchangeMs(tms, useBj);
+        const pnlCell = "";
+        return (
+          `<tr><td class="mono">${escHtml(oid)}</td>` +
+          `<td>${escHtml(src)}</td>` +
+          `<td>${pairCell}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(row.order_average, 8))}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(row.order_filled, 8))}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(row.order_fee, 8))}</td>` +
+          `<td>${pnlCell}</td>` +
+          `<td class="mono">${escHtml(tcell)}</td></tr>`
+        );
+      });
+      body.innerHTML = rows.join("");
+    }
+
+    async function loadExchangeTrades() {
+      const tradeServiceHint = document.getElementById("tradeServiceHint");
+      const tradeServiceWrap = document.getElementById("tradeServiceWrap");
+      const bodyEl = document.getElementById("tradeServiceBody");
+      if (!getSecret()) {
+        if (tradeServiceHint) tradeServiceHint.textContent = "请先保存访问密钥。";
+        if (tradeServiceWrap) tradeServiceWrap.style.display = "none";
+        if (bodyEl) bodyEl.innerHTML = "";
+        return;
+      }
+      const aid = document.getElementById("accountSelectTradeService")?.value || "";
+      const sym = (document.getElementById("exchangeTradesSymbol")?.value || "").trim();
+      const lim = document.getElementById("exchangeTradesLimit")?.value || "100";
+      if (tradeServiceHint) tradeServiceHint.textContent = "加载中…";
+      try {
+        const qs = new URLSearchParams();
+        qs.set("market", "future");
+        qs.set("limit", String(lim));
+        if (aid) qs.set("account_id", aid);
+        if (sym) qs.set("symbol", sym);
+        const r = await fetch("/api/account-log?" + qs.toString(), {
+          headers: { "X-TV-Secret": getSecret() },
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          if (tradeServiceHint) tradeServiceHint.textContent = "加载失败：" + (d.error || t);
+          if (tradeServiceWrap) tradeServiceWrap.style.display = "none";
+          if (bodyEl) bodyEl.innerHTML = "";
+          return;
+        }
+        const n = (d.items && d.items.length) || 0;
+        const hint =
+          "共 " +
+          n +
+          " 条（仅合约 · 本机器人）" +
+          (d.binance_default_type ? " · 当前环境 " + d.binance_default_type : "") +
+          (sym ? " · 品种筛选 " + sym : "");
+        renderExchangeTradesTable(d.items || [], hint);
+      } catch (e) {
+        if (tradeServiceHint) tradeServiceHint.textContent = "请求失败：" + String(e);
+        if (tradeServiceWrap) tradeServiceWrap.style.display = "none";
+        if (bodyEl) bodyEl.innerHTML = "";
+      }
+    }
+
+    async function deleteExecutionLog(scope, filterSource) {
+      if (!getSecret()) {
+        alert("请先保存访问密钥");
+        return;
+      }
+      if (!ensureAdminAction()) return;
+      let aid = "";
+      if (scope === "filtered") {
+        if (filterSource === "trades") {
+          aid = document.getElementById("accountSelectTradeService")?.value || "";
+        } else {
+          aid = document.getElementById("accountLogFilter")?.value || "";
+        }
+        if (!aid) {
+          alert("请先选择具体账户（不能为「全部」）");
+          return;
+        }
+      }
+      const msg =
+        scope === "all"
+          ? "确定清空全部执行记录？不可恢复。"
+          : "确定删除该账户的全部执行记录？不可恢复。";
+      if (!confirm(msg)) return;
+      try {
+        const q =
+          scope === "filtered" && aid
+            ? "?account_id=" + encodeURIComponent(aid)
+            : "";
+        const r = await fetch("/api/account-log" + q, {
+          method: "DELETE",
+          headers: { "X-TV-Secret": getSecret() },
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          alert(d.error || t || "删除失败");
+          return;
+        }
+        await loadAccountLog();
+        await loadExchangeTrades();
+        updateButtons();
+      } catch (e) {
+        alert(String(e));
+      }
+    }
+
+    async function clearSignalLog() {
+      if (!getSecret()) {
+        alert("请先保存访问密钥");
+        return;
+      }
+      if (!ensureAdminAction()) return;
+      if (
+        !confirm(
+          "确定清空 Webhook 聚合记录（signal_log）？不可恢复。不影响按笔执行记录。"
+        )
+      ) {
+        return;
+      }
+      try {
+        const r = await fetch("/api/signal-log", {
+          method: "DELETE",
+          headers: { "X-TV-Secret": getSecret() },
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          alert(d.error || t || "清空失败");
+          return;
+        }
+        alert("已清空 Webhook 聚合记录");
+      } catch (e) {
+        alert(String(e));
+      }
+    }
+
+    function renderBalancePlain(d) {
+      if (!balancePlain) return;
+      if (!d || !d.ok) {
+        balancePlain.style.display = "none";
+        if (balanceRawTitle) balanceRawTitle.style.display = "none";
+        if (balanceToggleWrap) balanceToggleWrap.style.display = "none";
+        return;
+      }
+      try {
+        const esc = (s) =>
+          String(s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        const block = (title, u) => {
+          if (!u || u.error) {
+            const err = u && u.error ? esc(String(u.error)) : "无数据";
+            return `<div class="row-line"><strong>${esc(title)}</strong>：${err}</div>`;
+          }
+          return (
+            `<div class="row-line"><strong>${esc(title)}</strong></div>` +
+            `<div class="row-line">余额（总权益）<span class="num">${fmtU(u.total)}</span> USDT</div>` +
+            `<div class="row-line">可用余额 <span class="num">${fmtU(u.free)}</span> USDT</div>` +
+            `<div class="row-line">占用（保证金等）<span class="num">${fmtU(u.used)}</span> USDT</div>`
+          );
+        };
+        if (d.accounts && d.accounts.length) {
+          let html = "";
+          d.accounts.forEach((acc, i) => {
+            const title = `${acc.remark || acc.account_id || "账户"}（固定 ${acc.fixed_quote_usdt != null ? acc.fixed_quote_usdt : "—"} USDT/笔）`;
+            if (acc.error) {
+              html +=
+                `<div class="row-line"><strong>${esc(title)}</strong></div>` +
+                `<div class="row-line hint">${esc(String(acc.error))}</div>`;
+            } else {
+              html += `<div class="row-line"><strong>${esc(title)}</strong></div>`;
+              html += block("U 本位合约", acc.usdt_future);
+              html += `<div style="margin:0.45rem 0;border-top:1px solid var(--border);"></div>`;
+              html += block("现货钱包", acc.usdt_spot);
+            }
+            if (i < d.accounts.length - 1) {
+              html += `<div style="margin:0.75rem 0;border-top:1px solid var(--border);"></div>`;
+            }
+          });
+          balancePlain.innerHTML =
+            html +
+            (d.hint
+              ? `<p class="hint" style="margin-top:0.65rem;margin-bottom:0;">${esc(d.hint)}</p>`
+              : "");
+        } else {
+          balancePlain.innerHTML =
+            block("U 本位合约", d.usdt_future) +
+            `<div style="margin:0.6rem 0;border-top:1px solid var(--border);"></div>` +
+            block("现货钱包", d.usdt_spot) +
+            (d.hint
+              ? `<p class="hint" style="margin-top:0.65rem;margin-bottom:0;">${esc(d.hint)}</p>`
+              : "");
+        }
+        balancePlain.style.display = "block";
+        if (balanceToggleWrap) balanceToggleWrap.style.display = "block";
+      } catch (err) {
+        balancePlain.innerHTML =
+          `<p class="hint">摘要渲染失败：${esc(err.message)}</p><p class="hint">请用下方「显示原始 JSON」查看接口数据。</p>`;
+        balancePlain.style.display = "block";
+        if (balanceToggleWrap) balanceToggleWrap.style.display = "block";
+      }
+    }
+
+    function setBalanceRawJsonVisible(show) {
+      balanceRawVisible = show;
+      if (balanceRawTitle) balanceRawTitle.style.display = show ? "block" : "none";
+      if (outBalance) outBalance.style.display = show ? "block" : "none";
+      if (btnToggleRawJson) {
+        btnToggleRawJson.textContent = show ? "隐藏原始 JSON" : "显示原始 JSON";
+      }
+    }
+
+    function setOrderRawVisible(show) {
+      orderRawVisible = show;
+      if (orderRawTitle) orderRawTitle.style.display = show ? "block" : "none";
+      if (outOrder) outOrder.style.display = show ? "block" : "none";
+      if (btnToggleOrderRaw) {
+        btnToggleOrderRaw.textContent = show ? "隐藏完整返回" : "显示完整返回";
+      }
+    }
+
+    function renderOrderSummary(d) {
+      if (!orderPlain) return;
+      if (!d || !d.ok || !d.order) {
+        orderPlain.style.display = "none";
+        if (orderToggleWrap) orderToggleWrap.style.display = "none";
+        return;
+      }
+      const o = d.order;
+      const sym = o.symbol || "—";
+      const side = o.side || "—";
+      const st = o.status || "—";
+      const avg = o.average != null ? o.average : "—";
+      const filled = o.filled != null ? o.filled : o.amount;
+      let cost = o.cost;
+      if (cost == null && o.info && o.info.cumQuote != null) cost = o.info.cumQuote;
+      const oid = o.id || (o.info && o.info.orderId) || "—";
+      orderPlain.innerHTML =
+        `<div class="row-line"><strong style="color:var(--ok)">下单成功</strong>${d.remark ? " · 账户 " + escHtml(String(d.remark)) : ""}</div>` +
+        `<div class="row-line">${sym} · ${side} · ${st}</div>` +
+        `<div class="row-line">成交量 <span class="num">${filled}</span> &nbsp; 均价 <span class="num">${avg}</span> &nbsp; 成交额约 <span class="num">${cost != null ? cost : "—"}</span> USDT</div>` +
+        `<div class="row-line hint" style="margin-top:0.5rem;">订单号 <code style="font-size:0.8rem">${oid}</code></div>`;
+      orderPlain.style.display = "block";
+      if (orderToggleWrap) orderToggleWrap.style.display = "block";
+    }
+
+    function loadSecret() {
+      const s = localStorage.getItem(KEY) || "";
+      secretEl.value = s;
+      dashboardRole = null;
+      updateButtons();
+      loadAccounts();
+      fetchStatus();
+    }
+    function saveSecret() {
+      localStorage.setItem(KEY, secretEl.value.trim());
+      dashboardRole = null;
+      updateButtons();
+      loadAccounts();
+      fetchStatus();
+    }
+    function clearSecret() {
+      localStorage.removeItem(KEY);
+      secretEl.value = "";
+      dashboardRole = null;
+      updateButtons();
+      loadAccounts();
+      fetchStatus();
+    }
+    function getSecret() {
+      return (secretEl.value || "").trim();
+    }
+    function isAdminRole() {
+      return dashboardRole === "admin";
+    }
+    function ensureAdminAction() {
+      if (isAdminRole()) return true;
+      alert("当前是访客只读密钥：仅可查看，不能改配置/删记录/下单。");
+      return false;
+    }
+    function updateButtons() {
+      const ok = getSecret().length > 0;
+      btnBalance.disabled = !ok;
+      btnOrder.disabled = !ok || !isAdminRole();
+      if (btnWebhookTest) btnWebhookTest.disabled = !ok || !isAdminRole();
+      if (btnAccountLog) btnAccountLog.disabled = !ok;
+      if (btnTradeServiceRefresh) btnTradeServiceRefresh.disabled = !ok;
+      const bLogDelF = document.getElementById("btnAccountLogDeleteFiltered");
+      const bLogDelA = document.getElementById("btnAccountLogDeleteAll");
+      const bTrDelF = document.getElementById("btnTradeDeleteFiltered");
+      const bTrDelA = document.getElementById("btnTradeDeleteAll");
+      const bSig = document.getElementById("btnSignalLogClear");
+      const logF = document.getElementById("accountLogFilter")?.value;
+      const tradeF = document.getElementById("accountSelectTradeService")?.value;
+      if (bLogDelF) bLogDelF.disabled = !ok || !isAdminRole() || !logF;
+      if (bLogDelA) bLogDelA.disabled = !ok || !isAdminRole();
+      if (bTrDelF) bTrDelF.disabled = !ok || !isAdminRole() || !tradeF;
+      if (bTrDelA) bTrDelA.disabled = !ok || !isAdminRole();
+      if (bSig) bSig.disabled = !ok || !isAdminRole();
+      if (btnSaveAccounts) btnSaveAccounts.disabled = !ok || !isAdminRole();
+      if (btnAddAccount) btnAddAccount.disabled = !ok || !isAdminRole();
+      if (btnReloadAccounts) btnReloadAccounts.disabled = !ok;
+      const btnSaveBot = document.getElementById("btnSaveBotSettings");
+      if (btnSaveBot) btnSaveBot.disabled = !ok || !isAdminRole();
+      const stopLossEnabled = document.getElementById("stopLossEnabled");
+      const stopLossPct = document.getElementById("stopLossPct");
+      if (stopLossEnabled) stopLossEnabled.disabled = !ok || !isAdminRole();
+      if (stopLossPct) stopLossPct.disabled = !ok || !isAdminRole();
+      document.querySelectorAll("#accountsTableBody button[data-del]").forEach((b) => {
+        b.disabled = !ok || !isAdminRole();
+      });
+    }
+
+    function authHeaders() {
+      const s = getSecret();
+      if (!s) throw new Error("请先填写并保存密钥");
+      return { "Content-Type": "application/json", "X-TV-Secret": s };
+    }
+
+    function populateAccountSelects() {
+      const balSel = document.getElementById("accountSelectBalance");
+      const ordSel = document.getElementById("accountSelectOrder");
+      const logSel = document.getElementById("accountLogFilter");
+      const opts = accountsState
+        .filter((a) => a.id)
+        .map((a) => {
+          const vid = String(a.id).replace(/"/g, "&quot;");
+          return `<option value="${vid}">${escHtml(a.remark || a.id)}</option>`;
+        })
+        .join("");
+      if (balSel) {
+        balSel.innerHTML = `<option value="">全部账户</option>` + opts;
+      }
+      if (ordSel) {
+        ordSel.innerHTML =
+          opts || `<option value="">请先添加并保存账户</option>`;
+      }
+      if (logSel) {
+        const cur = logSel.value;
+        logSel.innerHTML = `<option value="">全部</option>` + opts;
+        if (cur && [...logSel.options].some((o) => o.value === cur)) {
+          logSel.value = cur;
+        }
+      }
+      const tradeSvcSel = document.getElementById("accountSelectTradeService");
+      if (tradeSvcSel) {
+        const cur = tradeSvcSel.value;
+        tradeSvcSel.innerHTML = `<option value="">全部</option>` + opts;
+        if (cur && [...tradeSvcSel.options].some((o) => o.value === cur)) {
+          tradeSvcSel.value = cur;
+        }
+      }
+      updateButtons();
+    }
+
+    function renderAccountsTable() {
+      const tb = document.getElementById("accountsTableBody");
+      const wrap = accountsTableWrap;
+      if (!tb) return;
+      if (accountsState.length === 0) {
+        tb.innerHTML = "";
+        if (wrap) wrap.style.display = "none";
+        return;
+      }
+      if (wrap) wrap.style.display = "block";
+      tb.innerHTML = accountsState
+        .map((row, i) => {
+          const phK = row.api_key_preview
+            ? `已保存 ${escHtml(row.api_key_preview)}`
+            : "新账户请填写";
+          const phS = row.has_secret ? "留空不改" : "新账户必填";
+          const rid = row.id || "";
+          return (
+            `<tr data-idx="${i}" data-id="${escHtml(rid)}">` +
+            `<td><input type="text" name="remark" value="${escHtml(row.remark || "")}" style="width:100%;min-width:5rem" /></td>` +
+            `<td><select name="exchange"><option value="binance">Binance</option></select></td>` +
+            `<td><input type="text" name="api_key" placeholder="${phK}" value="${escHtml(row.api_key || "")}" style="width:100%;min-width:6rem" autocomplete="off" /></td>` +
+            `<td><input type="password" name="secret" placeholder="${phS}" value="" autocomplete="off" style="width:100%;min-width:5rem" /></td>` +
+            `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:5rem" /></td>` +
+            `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
+            `<td><input type="checkbox" name="webhook_enabled" ${row.webhook_enabled !== false ? "checked" : ""} /></td>` +
+            `<td><button type="button" class="secondary" data-del="${i}" ${isAdminRole() ? "" : "disabled"}>删除</button></td>` +
+            `</tr>`
+          );
+        })
+        .join("");
+      tb.querySelectorAll("button[data-del]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (!ensureAdminAction()) return;
+          const idx = parseInt(btn.getAttribute("data-del"), 10);
+          accountsState.splice(idx, 1);
+          renderAccountsTable();
+          populateAccountSelects();
+        });
+      });
+    }
+
+    function newAccountId() {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return "id-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+    }
+
+    function collectAccountsFromTable() {
+      const tb = document.getElementById("accountsTableBody");
+      if (!tb) return [];
+      const rows = [];
+      tb.querySelectorAll("tr[data-idx]").forEach((tr) => {
+        const idAttr = tr.getAttribute("data-id") || "";
+        const prev =
+          accountsState.find((x) => x.id === idAttr) || {};
+        const g = (n) => tr.querySelector(`[name="${n}"]`);
+        const ak = g("api_key")?.value?.trim() || "";
+        const sk = g("secret")?.value?.trim() || "";
+        rows.push({
+          id: idAttr || prev.id || newAccountId(),
+          remark: g("remark")?.value?.trim() || "未命名",
+          exchange: g("exchange")?.value || "binance",
+          api_key: ak,
+          secret: sk,
+          password: "",
+          fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
+          enabled: g("enabled")?.checked !== false,
+          webhook_enabled: g("webhook_enabled")?.checked !== false,
+        });
+      });
+      return rows;
+    }
+
+    async function loadAccounts() {
+      const el = accountsHint;
+      if (!getSecret()) {
+        accountsState = [];
+        renderAccountsTable();
+        if (el) el.textContent = "请先填写并保存上方「访问密钥」。";
+        return;
+      }
+      if (el) el.textContent = "加载中…";
+      try {
+        const r = await fetch("/api/accounts", {
+          headers: { "X-TV-Secret": getSecret() },
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          if (el) el.textContent = "加载失败：" + (d.error || t || r.status);
+          accountsState = [];
+          renderAccountsTable();
+          return;
+        }
+        accountsState = (d.accounts || []).map((a) => ({
+          id: a.id,
+          remark: a.remark || "",
+          exchange: a.exchange || "binance",
+          api_key: "",
+          secret: "",
+          api_key_preview: a.api_key_preview,
+          has_secret: a.has_secret,
+          fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
+          enabled: a.enabled !== false,
+          webhook_enabled: a.webhook_enabled !== false,
+        }));
+        if (el) {
+          el.innerHTML =
+            `当前 <strong>${accountsState.length}</strong> 个账户；` +
+            `数据文件：<code style="font-size:0.75rem">${escHtml(d.path || "")}</code>`;
+        }
+        renderAccountsTable();
+        populateAccountSelects();
+        maybeRefreshBalanceIfVisible();
+      } catch (e) {
+        if (el) el.textContent = "请求失败：" + String(e);
+      }
+    }
+
+    async function saveAccounts() {
+      if (!ensureAdminAction()) return;
+      const rows = collectAccountsFromTable();
+      if (rows.length === 0) {
+        alert("请至少添加一个账户");
+        return;
+      }
+      try {
+        const r = await fetch("/api/accounts", {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({ accounts: rows }),
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          alert(d.error || t || "保存失败");
+          return;
+        }
+        accountsState = (d.accounts || []).map((a) => ({
+          id: a.id,
+          remark: a.remark || "",
+          exchange: a.exchange || "binance",
+          api_key: "",
+          secret: "",
+          api_key_preview: a.api_key_preview,
+          has_secret: a.has_secret,
+          fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
+          enabled: a.enabled !== false,
+          webhook_enabled: a.webhook_enabled !== false,
+        }));
+        renderAccountsTable();
+        populateAccountSelects();
+        await fetchStatus();
+        loadAccountLog();
+        maybeRefreshBalanceIfVisible();
+      } catch (e) {
+        alert(String(e));
+      }
+    }
+
+    async function fetchStatus() {
+      if (!getSecret()) {
+        dashboardRole = null;
+        updateButtons();
+        statusBox.innerHTML =
+          '<span class="pill off">未鉴权</span> 请先在上方输入并保存「访问密钥」。';
+        return;
+      }
+      try {
+        const r = await fetch("/api/status", { headers: authHeaders() });
+        const d = await r.json();
+        if (!d.ok) throw new Error(JSON.stringify(d));
+        dashboardRole = d.auth_role || null;
+        const api = d.api_configured
+          ? '<span class="pill on">已配置</span>'
+          : '<span class="pill off">未配置</span>';
+        const wh = d.webhook_secret_configured
+          ? '<span class="pill on">已配置</span>'
+          : '<span class="pill off">未配置</span>';
+        const net = d.testnet
+          ? '<span class="pill on">测试网</span>'
+          : '<span class="pill off">主网</span>';
+        const dash = d.dashboard_secret_configured
+          ? '<span class="pill on">已配置</span>'
+          : '<span class="pill off">未配置</span>';
+        const dashNote = d.dashboard_uses_dedicated_env
+          ? "（独立 DASHBOARD_SECRET）"
+          : "";
+        const rolePill =
+          dashboardRole === "admin"
+            ? '<span class="pill on">主密钥（可读写）</span>'
+            : '<span class="pill off">访客只读</span>';
+        const ac = typeof d.accounts_count === "number" ? d.accounts_count : "—";
+        const envLine = d.env_path
+          ? `<br/><span style="font-size:0.75rem;color:var(--muted)">配置路径 ${d.env_file_exists ? "✓" : "✗"}</span> <code style="font-size:0.7rem">${d.env_path}</code>`
+          : "";
+        statusBox.innerHTML =
+          `${net} 模式：<strong>${d.binance_type}</strong><br/>` +
+          `<span>当前权限</span> ${rolePill}<br/>` +
+          `<span>交易账户数</span> ${ac}<br/>` +
+          `<span>已配置 API 的账户</span> ${api}<br/>` +
+          `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
+          `<span>TV Webhook 密钥</span> ${wh}<br/>` +
+          `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}` +
+          envLine;
+        updateButtons();
+        const sle = document.getElementById("stopLossEnabled");
+        if (sle && typeof d.stop_loss_enabled === "boolean") {
+          sle.checked = d.stop_loss_enabled;
+        }
+        const slp = document.getElementById("stopLossPct");
+        if (slp && d.stop_loss_pct != null && !Number.isNaN(Number(d.stop_loss_pct))) {
+          slp.value = String(d.stop_loss_pct);
+        }
+      } catch (e) {
+        dashboardRole = null;
+        updateButtons();
+        statusBox.innerHTML =
+          '<span class="pill off">无法连接 /api/status</span> ' + e.message;
+      }
+    }
+
+    async function saveBotSettings() {
+      if (!getSecret()) {
+        alert("请先填写并保存访问密钥");
+        return;
+      }
+      if (!ensureAdminAction()) return;
+      const pctRaw = document.getElementById("stopLossPct")?.value;
+      const pct = parseFloat(pctRaw);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 50) {
+        alert("止损幅度须在 0～50% 之间（不含 0）");
+        return;
+      }
+      try {
+        const r = await fetch("/api/bot-settings", {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            stop_loss_enabled: !!document.getElementById("stopLossEnabled")?.checked,
+            stop_loss_pct: pct,
+          }),
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          alert(d.error || t || "保存失败");
+          return;
+        }
+        alert("止损设置已保存");
+        await fetchStatus();
+      } catch (e) {
+        alert(String(e));
+      }
+    }
+
+    async function doBalance() {
+      if (balancePlain) balancePlain.style.display = "none";
+      if (balanceRawTitle) balanceRawTitle.style.display = "none";
+      if (balanceToggleWrap) balanceToggleWrap.style.display = "none";
+      setBalanceRawJsonVisible(false);
+      if (outBalance) {
+        outBalance.style.display = "block";
+        outBalance.className = "out";
+        outBalance.textContent = "请求中…";
+      }
+      try {
+        const aid = document.getElementById("accountSelectBalance")?.value || "";
+        const body = { secret: getSecret() };
+        if (aid) body.account_id = aid;
+        const r = await fetch("/api/balance", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+        const t = await r.text();
+        let d;
+        try { d = JSON.parse(t); } catch { d = { raw: t }; }
+        if (d.raw && String(d.raw).includes("未配置 TV_WEBHOOK_SECRET") && String(d.raw).includes("<!doctype html>")) {
+          d = {
+            ...d,
+            说明: "这是旧版服务的 HTML 报错。请关闭终端里旧的 python 进程后，重新运行: python python量化/tv_binance_bot/app.py",
+          };
+        }
+        if (outBalance) outBalance.textContent = JSON.stringify(d, null, 2);
+        renderBalancePlain(d);
+        if (!r.ok || (d && d.ok === false)) {
+          if (outBalance) outBalance.classList.add("err");
+          setBalanceRawJsonVisible(true);
+        } else {
+          if (outBalance) outBalance.classList.remove("err");
+          setBalanceRawJsonVisible(false);
+        }
+      } catch (e) {
+        if (outBalance) {
+          outBalance.classList.add("err");
+          outBalance.textContent = String(e);
+        }
+        setBalanceRawJsonVisible(true);
+      }
+    }
+
+    async function doOrder() {
+      if (!ensureAdminAction()) return;
+      if (orderPlain) orderPlain.style.display = "none";
+      if (orderToggleWrap) orderToggleWrap.style.display = "none";
+      if (orderRawTitle) orderRawTitle.style.display = "none";
+      setOrderRawVisible(false);
+      if (outOrder) {
+        outOrder.style.display = "block";
+        outOrder.className = "out";
+        outOrder.textContent = "请求中…";
+      }
+      const accountId = document.getElementById("accountSelectOrder")?.value || "";
+      if (!accountId) {
+        alert("请选择交易账户");
+        return;
+      }
+      const sym = document.getElementById("sym").value.trim();
+      const side = document.getElementById("side").value;
+      const mode = document.getElementById("mode").value;
+      const qty = parseFloat(document.getElementById("qty").value);
+      const reduce = document.getElementById("reduce").value === "yes";
+      if (!sym) {
+        if (outOrder) {
+          outOrder.classList.add("err");
+          outOrder.textContent = "请填写交易对";
+        }
+        setOrderRawVisible(true);
+        return;
+      }
+      if (mode === "amount" && Number.isNaN(qty)) {
+        if (outOrder) {
+          outOrder.classList.add("err");
+          outOrder.textContent = "按基础币下单时请填写有效数量";
+        }
+        setOrderRawVisible(true);
+        return;
+      }
+      const body = {
+        secret: getSecret(),
+        account_id: accountId,
+        action: side,
+        symbol: sym,
+        reduce_only: reduce,
+      };
+      if (mode === "amount") {
+        body.amount = qty;
+        body.use_base_amount = true;
+      } else {
+        body.use_base_amount = false;
+      }
+
+      try {
+        const r = await fetch("/api/order", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+        const t = await r.text();
+        let d;
+        try { d = JSON.parse(t); } catch { d = { raw: t }; }
+        if (outOrder) outOrder.textContent = JSON.stringify(d, null, 2);
+        if (!r.ok || (d && d.ok === false)) {
+          if (outOrder) outOrder.classList.add("err");
+          if (orderPlain && d && d.error) {
+            const errText = String(d.error).replace(/</g, "&lt;").replace(/&/g, "&amp;");
+            orderPlain.innerHTML =
+              `<div class="row-line"><strong style="color:var(--err)">下单失败</strong></div>` +
+              `<div class="row-line hint">${errText}</div>`;
+            orderPlain.style.display = "block";
+            if (orderToggleWrap) orderToggleWrap.style.display = "block";
+          } else {
+            renderOrderSummary(null);
+          }
+          setOrderRawVisible(true);
+          loadAccountLog();
+        } else {
+          if (outOrder) outOrder.classList.remove("err");
+          renderOrderSummary(d);
+          setOrderRawVisible(false);
+          loadAccountLog();
+        }
+      } catch (e) {
+        if (outOrder) {
+          outOrder.classList.add("err");
+          outOrder.textContent = String(e);
+        }
+        renderOrderSummary(null);
+        setOrderRawVisible(true);
+        loadAccountLog();
+      }
+    }
+
+    document.getElementById("btnSaveSecret").addEventListener("click", saveSecret);
+    document.getElementById("btnClearSecret").addEventListener("click", clearSecret);
+    function addAccountRow() {
+      if (!ensureAdminAction()) return;
+      accountsState.push({
+        id: newAccountId(),
+        remark: "",
+        exchange: "binance",
+        api_key: "",
+        secret: "",
+        fixed_quote_usdt: 500,
+        enabled: true,
+        webhook_enabled: true,
+      });
+      renderAccountsTable();
+      populateAccountSelects();
+    }
+    if (btnAddAccount) btnAddAccount.addEventListener("click", addAccountRow);
+    if (btnSaveAccounts) btnSaveAccounts.addEventListener("click", saveAccounts);
+    const btnSaveBotSettings = document.getElementById("btnSaveBotSettings");
+    if (btnSaveBotSettings) btnSaveBotSettings.addEventListener("click", saveBotSettings);
+    if (btnReloadAccounts) btnReloadAccounts.addEventListener("click", loadAccounts);
+    secretEl.addEventListener("input", updateButtons);
+    btnBalance.addEventListener("click", doBalance);
+    const accountSelectBalanceEl = document.getElementById("accountSelectBalance");
+    if (accountSelectBalanceEl) {
+      accountSelectBalanceEl.addEventListener("change", () => {
+        if (getSecret()) doBalance().catch(() => {});
+      });
+    }
+    if (btnToggleRawJson) {
+      btnToggleRawJson.addEventListener("click", () => {
+        setBalanceRawJsonVisible(!balanceRawVisible);
+      });
+    }
+    btnOrder.addEventListener("click", doOrder);
+
+    async function doWebhookTest() {
+      const s = getSecret();
+      if (!s) {
+        alert("请先填写并保存访问密钥");
+        return;
+      }
+      const ta = document.getElementById("webhookTestBody");
+      const raw = (ta && ta.value) ? ta.value.trim() : "";
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        alert("JSON 格式不对，请检查引号、逗号");
+        return;
+      }
+      const plain = document.getElementById("webhookTestPlain");
+      const out = document.getElementById("outWebhookTest");
+      if (plain) {
+        plain.style.display = "none";
+        plain.innerHTML = "";
+      }
+      if (out) {
+        out.style.display = "block";
+        out.className = "out";
+        out.textContent = "请求中…";
+      }
+      try {
+        const r = await fetch("/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-TV-Secret": s,
+          },
+          body: JSON.stringify(parsed),
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = { raw: t };
+        }
+        if (out) {
+          out.textContent = JSON.stringify(d, null, 2);
+          if (!r.ok || (d && d.ok === false)) out.classList.add("err");
+          else out.classList.remove("err");
+        }
+        if (plain && d && d.results && d.results.length) {
+          const lines = d.results.map((r) => {
+            if (r.ok && r.order) {
+              const o = r.order;
+              return `${escHtml(r.remark || r.account_id)}：${o.symbol || ""} · ${o.side || ""} · 订单 ${o.id || ""}`;
+            }
+            return `${escHtml(r.remark || r.account_id)}：失败 ${escHtml(String(r.error || ""))}`;
+          });
+          plain.innerHTML =
+            `<div class="row-line"><strong style="color:var(--ok)">Webhook 已执行</strong>（多账户）</div>` +
+            lines.map((l) => `<div class="row-line hint">${l}</div>`).join("");
+          plain.style.display = "block";
+        } else if (plain && d && d.error) {
+          plain.innerHTML =
+            `<div class="row-line"><strong style="color:var(--err)">失败</strong></div>` +
+            `<div class="row-line hint">${String(d.error).replace(/</g, "&lt;")}</div>`;
+          plain.style.display = "block";
+        }
+        loadAccountLog();
+      } catch (e) {
+        if (out) {
+          out.classList.add("err");
+          out.textContent = String(e);
+        }
+      }
+    }
+
+    if (btnWebhookTest) btnWebhookTest.addEventListener("click", doWebhookTest);
+    if (btnAccountLog) btnAccountLog.addEventListener("click", loadAccountLog);
+    if (btnTradeServiceRefresh) btnTradeServiceRefresh.addEventListener("click", loadExchangeTrades);
+    const btnTradeDeleteFiltered = document.getElementById("btnTradeDeleteFiltered");
+    const btnTradeDeleteAll = document.getElementById("btnTradeDeleteAll");
+    const btnAccountLogDeleteFiltered = document.getElementById("btnAccountLogDeleteFiltered");
+    const btnAccountLogDeleteAll = document.getElementById("btnAccountLogDeleteAll");
+    const btnSignalLogClear = document.getElementById("btnSignalLogClear");
+    if (btnAccountLogDeleteFiltered) {
+      btnAccountLogDeleteFiltered.addEventListener("click", () => {
+        deleteExecutionLog("filtered", "logs");
+      });
+    }
+    if (btnAccountLogDeleteAll) {
+      btnAccountLogDeleteAll.addEventListener("click", () => {
+        deleteExecutionLog("all", "logs");
+      });
+    }
+    if (btnTradeDeleteFiltered) {
+      btnTradeDeleteFiltered.addEventListener("click", () => {
+        deleteExecutionLog("filtered", "trades");
+      });
+    }
+    if (btnTradeDeleteAll) {
+      btnTradeDeleteAll.addEventListener("click", () => {
+        deleteExecutionLog("all", "trades");
+      });
+    }
+    if (btnSignalLogClear) btnSignalLogClear.addEventListener("click", clearSignalLog);
+    if (accountLogTzBeijing) {
+      accountLogTzBeijing.addEventListener("change", () => {
+        loadAccountLog();
+      });
+    }
+    const tradeTzBeijingEl = document.getElementById("tradeTzBeijing");
+    if (tradeTzBeijingEl) {
+      tradeTzBeijingEl.addEventListener("change", () => {
+        loadExchangeTrades();
+      });
+    }
+    const accountLogFilterEl = document.getElementById("accountLogFilter");
+    if (accountLogFilterEl) {
+      accountLogFilterEl.addEventListener("change", () => {
+        loadAccountLog();
+        updateButtons();
+      });
+    }
+    const accountSelectTradeServiceEl = document.getElementById("accountSelectTradeService");
+    if (accountSelectTradeServiceEl) {
+      accountSelectTradeServiceEl.addEventListener("change", () => {
+        loadExchangeTrades();
+        updateButtons();
+      });
+    }
+    if (btnToggleOrderRaw) {
+      btnToggleOrderRaw.addEventListener("click", () => {
+        setOrderRawVisible(!orderRawVisible);
+      });
+    }
+
+    document.getElementById("btnCopyTvStrategyWebhook")?.addEventListener("click", async () => {
+      const el = document.getElementById("tplTvStrategyWebhook");
+      const b = document.getElementById("btnCopyTvStrategyWebhook");
+      if (!el) return;
+      try {
+        await navigator.clipboard.writeText(el.value);
+        if (b) b.textContent = "已复制";
+        setTimeout(() => {
+          if (b) b.textContent = "复制告警 JSON";
+        }, 2000);
+      } catch {
+        el.select();
+        document.execCommand("copy");
+      }
+    });
+
+    const host = window.location.origin;
+    document.getElementById("webhookHint").textContent = host + "/webhook";
+
+    function initTabs() {
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const name = btn.getAttribute("data-tab");
+          if (!name) return;
+          document.querySelectorAll(".tab-btn").forEach((b) => {
+            const on = b === btn;
+            b.classList.toggle("active", on);
+            b.setAttribute("aria-selected", on ? "true" : "false");
+          });
+          document.querySelectorAll(".tab-panel").forEach((p) => {
+            p.classList.toggle("active", p.id === "panel-" + name);
+          });
+          if (name === "logs") loadAccountLog();
+          if (name === "trades") {
+            loadExchangeTrades();
+          }
+          if (name === "balance" && getSecret()) {
+            doBalance().catch(() => {});
+          }
+        });
+      });
+    }
+    initTabs();
+
+    function maybeRefreshBalanceIfVisible() {
+      const p = document.getElementById("panel-balance");
+      if (p && p.classList.contains("active") && getSecret()) {
+        doBalance().catch(() => {});
+      }
+    }
+
+    loadSecret();
+    fetchStatus();
+    loadAccounts();
+    loadAccountLog();
+  </script>
+</body>
+</html>
