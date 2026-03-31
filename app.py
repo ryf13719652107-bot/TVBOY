@@ -89,6 +89,7 @@ def _migrate_legacy_if_needed() -> None:
         "api_key": k,
         "secret": s,
         "password": "",
+        "template_capital_usdt": 0,
         "fixed_quote_usdt": fq,
         "enabled": True,
         "webhook_enabled": True,
@@ -136,6 +137,13 @@ DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
 BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
 # 默认每笔用多少 USDT（可被请求体 quote_amount 覆盖）
 DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
+# 模板本金（USDT）：>0 时，若 TV 载荷含 contracts，则按比例换算各账户下单数量
+TEMPLATE_BASE_CAPITAL_USDT = float(os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0"))
+# 启动时预加载交易所 markets（减少重启后首单 load_markets 冷启动延迟）
+PRELOAD_MARKETS_ON_STARTUP = (
+    os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
+    in ("1", "true", "yes", "on")
+)
 # 测试网（需使用币安测试网密钥）
 USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
 # Webhook 下单后非关键后处理延迟秒数（止损/撤单/日志落盘）
@@ -951,7 +959,7 @@ def _record_account_rows_from_webhook(
         rid = str(r.get("account_id") or "")
         remark = str(r.get("remark") or "")
         ts_ms = int(time.time() * 1000)
-        fq = r.get("fixed_quote_usdt")
+        fq = r.get("used_quote_usdt", r.get("fixed_quote_usdt"))
         fq_f = float(fq) if fq is not None else None
         if r.get("ok") and r.get("order"):
             o = r["order"]
@@ -1021,7 +1029,8 @@ def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
 def refresh_env() -> None:
     """每次请求前从 .env 重新载入。"""
     global WEBHOOK_SECRET, DASHBOARD_SECRET, DASHBOARD_VIEWER_SECRET
-    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, USE_TESTNET, WEBHOOK_POST_DELAY_SEC
+    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, TEMPLATE_BASE_CAPITAL_USDT
+    global USE_TESTNET, WEBHOOK_POST_DELAY_SEC, PRELOAD_MARKETS_ON_STARTUP
     global BALANCE_CACHE_TTL_SEC
     load_dotenv(_env, override=True)
     WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
@@ -1029,9 +1038,31 @@ def refresh_env() -> None:
     DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
     BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
     DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
+    TEMPLATE_BASE_CAPITAL_USDT = float(os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0"))
     USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
     WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
     BALANCE_CACHE_TTL_SEC = float(os.getenv("BALANCE_CACHE_TTL_SEC", "2"))
+    PRELOAD_MARKETS_ON_STARTUP = (
+        os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
+        in ("1", "true", "yes", "on")
+    )
+
+
+def preload_trade_markets_on_startup() -> None:
+    """启动时预热交易账户 markets，降低首笔 webhook 下单冷启动延迟。"""
+    targets = webhook_accounts()
+    if not targets:
+        return
+    warmed = 0
+    for a in targets:
+        try:
+            ex = get_exchange_for_account(a, purpose="trade")
+            ex.load_markets()
+            warmed += 1
+        except Exception as e:
+            logger.warning("启动预加载 markets 失败（账户 %s）: %s", a.get("id"), e)
+    if warmed:
+        logger.info("启动预加载 markets 完成：%s 个账户", warmed)
 
 
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
@@ -1091,25 +1122,62 @@ def webhook_accounts() -> list[dict[str, Any]]:
             continue
         if not (a.get("api_key") or "").strip() or not (a.get("secret") or "").strip():
             continue
-        if float(a.get("fixed_quote_usdt") or 0) <= 0:
+        fq = float(a.get("fixed_quote_usdt") or 0)
+        tpl_cap = float(a.get("template_capital_usdt") or 0)
+        if fq <= 0 and tpl_cap <= 0:
             continue
         out.append(a)
     return out
+
+
+def _payload_contracts_amount(payload: dict[str, Any]) -> float | None:
+    raw = payload.get("contracts")
+    if raw is None:
+        raw = payload.get("strategy.order.contracts")
+    if raw is None:
+        return None
+    try:
+        v = float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return v
 
 
 def build_order_payload_for_account(
     base: dict[str, Any], account: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    多账户：每账户使用固定 USDT 名义，不按 TV 的 quote_amount 比例缩放；
-    余额变化也不改此固定值（由用户在各账户单独配置 fixed_quote_usdt）。
+    多账户下单二选一：
+    1) 模板比例模式：.env 设 TEMPLATE_BASE_CAPITAL_USDT>0 且 TV 提供 contracts，
+       使用 账户本金/template本金 比例换算 amount；
+    2) 回退固定名义：使用账户 fixed_quote_usdt 作为 quote_amount。
     """
     p = dict(base)
+    tv_contracts = _payload_contracts_amount(base)
+    tpl_base = float(TEMPLATE_BASE_CAPITAL_USDT or 0)
+    acc_cap = float(account.get("template_capital_usdt") or 0)
+    if tpl_base > 0 and tv_contracts is not None and acc_cap > 0:
+        scale = acc_cap / tpl_base
+        amt = tv_contracts * scale
+        if amt <= 0:
+            raise ValueError(f"账户「{account.get('remark')}」模板换算后数量无效")
+        p["amount"] = amt
+        p.pop("quote_amount", None)
+        p["_sizing_mode"] = "template_contracts"
+        p["_template_scale"] = scale
+        p["_template_contracts_raw"] = tv_contracts
+        return p
+
     fq = float(account.get("fixed_quote_usdt") or 0)
     if fq <= 0:
-        raise ValueError(f"账户「{account.get('remark')}」未设置固定下单金额（USDT）")
+        raise ValueError(
+            f"账户「{account.get('remark')}」未设置固定下单金额（USDT），且模板比例条件未满足"
+        )
     p["quote_amount"] = fq
     p.pop("amount", None)
+    p["_sizing_mode"] = "fixed_quote"
     return p
 
 
@@ -1333,25 +1401,50 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
     if action not in ("buy", "sell"):
         raise ValueError(f"action/side 必须是 buy 或 sell，当前: {action}")
 
-    quote_amount = payload.get("quote_amount")
-    amount = payload.get("amount")
     reduce_only = _resolve_reduce_only(payload, action)
     payload["_resolved_reduce_only"] = reduce_only
-
-    if quote_amount is not None:
-        cost = float(quote_amount)
-    elif amount is not None:
-        cost = None
-        amt = float(amount)
-    else:
-        cost = DEFAULT_QUOTE_AMOUNT
-        amt = None
+    quote_amount = payload.get("quote_amount")
+    amount = payload.get("amount")
 
     params: dict[str, Any] = {}
     if reduce_only:
         params["reduceOnly"] = True
 
     symbol = resolve_symbol(exchange, symbol)
+
+    full_flat = _tv_payload_is_strategy_full_flat(payload, reduce_only)
+    # 合约仅减仓：
+    # - 若策略语义是「全平」（market_position=flat 或 position_size=0），按交易所持仓全平；
+    # - 其它减仓场景（部分减仓）按传入 amount/contracts 或 quote 逻辑执行。
+    if reduce_only and BINANCE_DEFAULT_TYPE == "future":
+        if full_flat:
+            pos_abs = _futures_net_position_abs(exchange, symbol)
+            if pos_abs is None:
+                raise ValueError("查询当前持仓失败，无法执行仅减仓全平")
+            if pos_abs <= 0:
+                raise ValueError("当前无持仓可平")
+            cost = None
+            amt = float(pos_abs)
+        elif amount is not None:
+            cost = None
+            amt = float(amount)
+        else:
+            if quote_amount is not None:
+                cost = float(quote_amount)
+                amt = None
+            else:
+                cost = DEFAULT_QUOTE_AMOUNT
+                amt = None
+    else:
+        if quote_amount is not None:
+            cost = float(quote_amount)
+            amt = None
+        elif amount is not None:
+            cost = None
+            amt = float(amount)
+        else:
+            cost = DEFAULT_QUOTE_AMOUNT
+            amt = None
 
     if cost is not None:
         # 现货/合约均按最新价把 USDT 名义换算成基础币数量（与币安 API 一致）
@@ -1396,6 +1489,7 @@ def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 "api_key_preview": _mask_api_key((a.get("api_key") or "")),
                 "has_secret": bool((a.get("secret") or "").strip()),
                 "fixed_quote_usdt": a.get("fixed_quote_usdt"),
+                "template_capital_usdt": a.get("template_capital_usdt"),
                 "enabled": a.get("enabled", True),
                 "webhook_enabled": a.get("webhook_enabled", True),
             }
@@ -1432,9 +1526,10 @@ def api_status():
             "dashboard_viewer_secret_configured": bool(viewer),
             "auth_role": dashboard_auth_role(),
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
+            "template_base_capital_usdt": TEMPLATE_BASE_CAPITAL_USDT,
             "stop_loss_enabled": bs["stop_loss_enabled"],
             "stop_loss_pct": bs["stop_loss_pct"],
-            "hint": "多账户：TradingView 信号按各账户「固定下单 USDT」分别下单，与策略里写的名义无关；余额增减不改变该固定值。",
+            "hint": "多账户：优先模板比例下单（需 .env 设 TEMPLATE_BASE_CAPITAL_USDT 且 TV 提供 contracts，账户需填模板本金）；否则回退账户固定 USDT。",
         }
     )
 
@@ -1506,11 +1601,12 @@ def api_accounts_put():
                     }
                 ), 400
         fq = float(row.get("fixed_quote_usdt") or 0)
-        if fq <= 0:
+        tcap = float(row.get("template_capital_usdt") or 0)
+        if fq <= 0 and tcap <= 0:
             return jsonify(
                 {
                     "ok": False,
-                    "error": f"账户「{row.get('remark') or rid}」固定下单金额须大于 0",
+                    "error": f"账户「{row.get('remark') or rid}」固定USDT或模板本金至少一项须大于 0",
                 }
             ), 400
         merged.append(
@@ -1522,6 +1618,7 @@ def api_accounts_put():
                 "secret": sk,
                 "password": (row.get("password") or "").strip(),
                 "fixed_quote_usdt": fq,
+                "template_capital_usdt": tcap,
                 "enabled": bool(row.get("enabled", True)),
                 "webhook_enabled": bool(row.get("webhook_enabled", True)),
             }
@@ -1698,6 +1795,7 @@ def api_balance():
                         "account_id": a["id"],
                         "remark": a.get("remark"),
                         "fixed_quote_usdt": a.get("fixed_quote_usdt"),
+                        "template_capital_usdt": a.get("template_capital_usdt"),
                         "usdt": primary,
                         "usdt_future": usdt_future,
                         "usdt_spot": usdt_spot,
@@ -1737,7 +1835,7 @@ def _strip_secret_from_payload(body: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/order")
 def api_order():
-    """浏览器手动测试下单；须指定 account_id，名义按该账户固定 USDT。"""
+    """浏览器手动测试下单；须指定 account_id。默认走账户模板/固定USDT下单逻辑。"""
     bad = dashboard_auth_response_if_invalid()
     if bad:
         return bad
@@ -1755,15 +1853,18 @@ def api_order():
     try:
         t_total_start = time.time()
         ex = get_exchange_for_account(a, purpose="trade")
+        sizing_mode = None
         if use_base_amount:
             t_exec_start = time.time()
             order = _merge_order_with_fetch(ex, place_order(ex, payload))
             ro = bool(payload.get("_resolved_reduce_only", False))
+            sizing_mode = "manual_amount"
         else:
             op = build_order_payload_for_account(payload, a)
             t_exec_start = time.time()
             order = _merge_order_with_fetch(ex, place_order(ex, op))
             ro = bool(op.get("_resolved_reduce_only", False))
+            sizing_mode = op.get("_sizing_mode")
             payload["_resolved_reduce_only"] = op.get("_resolved_reduce_only")
             payload["reduce_only"] = op.get("_resolved_reduce_only")
         ex_raw = order.get("timestamp") or order.get("lastUpdateTimestamp")
@@ -1824,6 +1925,7 @@ def api_order():
                 "account_id": a["id"],
                 "remark": a.get("remark"),
                 "used_quote_usdt": None if use_base_amount else a.get("fixed_quote_usdt"),
+                "sizing_mode": sizing_mode,
                 "stop_loss_order": sl_order,
                 "stop_loss_error": sl_err,
                 **cancel_res,
@@ -2053,12 +2155,12 @@ def webhook():
         return auth_err
     targets = webhook_accounts()
     if not targets:
-        logger.error("无可用交易账户（请添加账户、填写密钥、固定金额，并勾选参与 Webhook）")
+        logger.error("无可用交易账户（请添加账户、填写密钥、配置模板本金或固定金额，并勾选参与 Webhook）")
         return (
             jsonify(
                 {
                     "ok": False,
-                    "error": "无可用交易账户：请在控制台添加账户、保存 API，并设置固定下单 USDT 与 Webhook 跟单。",
+                    "error": "无可用交易账户：请在控制台添加账户、保存 API，并设置账户模板本金或固定下单 USDT 与 Webhook 跟单。",
                 }
             ),
             503,
@@ -2088,6 +2190,9 @@ def webhook():
                     "ok": True,
                     "order": order,
                     "fixed_quote_usdt": a.get("fixed_quote_usdt"),
+                    "used_quote_usdt": op.get("quote_amount"),
+                    "sizing_mode": op.get("_sizing_mode"),
+                    "template_scale": op.get("_template_scale"),
                     "stop_loss_order": None,
                     "stop_loss_error": None,
                     "post_process": f"delayed_{int(WEBHOOK_POST_DELAY_SEC)}s",
@@ -2150,6 +2255,8 @@ def main():
         )
     elif not WEBHOOK_SECRET:
         print("提示: 未设置 TV_WEBHOOK_SECRET，TradingView /webhook 仍不可用。", file=sys.stderr)
+    if PRELOAD_MARKETS_ON_STARTUP:
+        preload_trade_markets_on_startup()
     port = int(os.getenv("PORT", "5000"))
     # threaded=True：控制台查余额/拉日志等慢请求不阻塞另一条线程处理 /webhook 下单
     threaded = os.getenv("FLASK_THREADED", "true").lower() in ("1", "true", "yes", "on")

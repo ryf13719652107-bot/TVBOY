@@ -381,7 +381,7 @@
     <div id="panel-accounts" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
       <h2>交易账户</h2>
-      <p class="hint" style="margin-top: 0;">每个账户单独<strong>固定 USDT</strong>；勾选 Webhook 的账户会跟 TV 信号下单。TV 内 <code>quote_amount</code> 不参与名义计算；余额变化不改变该固定值。</p>
+      <p class="hint" style="margin-top: 0;">优先按<strong>模板比例</strong>下单（TV 发送 <code>contracts</code> 且服务端配置模板本金时）：账户下单量 = TV contracts × (账户模板本金 / 模板本金)。不满足条件时回退为每账户固定 USDT。</p>
       <p class="hint" id="accountsHint" style="margin-top: 0.35rem;">请先填写并保存「访问密钥」。</p>
       <div class="table-wrap" id="accountsTableWrap" style="display: none; max-height: none;">
         <table class="siglog" id="accountsTable" style="font-size: 0.78rem;">
@@ -391,7 +391,8 @@
               <th>交易所</th>
               <th>API Key</th>
               <th>Secret</th>
-              <th>固定USDT</th>
+              <th>模板本金(USDT)</th>
+              <th>固定USDT(回退)</th>
               <th>启用</th>
               <th>Webhook</th>
               <th></th>
@@ -1072,7 +1073,7 @@
         if (d.accounts && d.accounts.length) {
           let html = "";
           d.accounts.forEach((acc, i) => {
-            const title = `${acc.remark || acc.account_id || "账户"}（固定 ${acc.fixed_quote_usdt != null ? acc.fixed_quote_usdt : "—"} USDT/笔）`;
+            const title = `${acc.remark || acc.account_id || "账户"}（模板本金 ${acc.template_capital_usdt != null ? acc.template_capital_usdt : "—"}U；固定回退 ${acc.fixed_quote_usdt != null ? acc.fixed_quote_usdt : "—"}U）`;
             if (acc.error) {
               html +=
                 `<div class="row-line"><strong>${esc(title)}</strong></div>` +
@@ -1286,7 +1287,8 @@
             `<td><select name="exchange"><option value="binance">Binance</option></select></td>` +
             `<td><input type="text" name="api_key" placeholder="${phK}" value="${escHtml(row.api_key || "")}" style="width:100%;min-width:6rem" autocomplete="off" /></td>` +
             `<td><input type="password" name="secret" placeholder="${phS}" value="" autocomplete="off" style="width:100%;min-width:5rem" /></td>` +
-            `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:5rem" /></td>` +
+            `<td><input type="number" name="template_capital_usdt" step="0.01" min="0" value="${Number(row.template_capital_usdt) || 0}" style="width:6.5rem" /></td>` +
+            `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:6rem" /></td>` +
             `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
             `<td><input type="checkbox" name="webhook_enabled" ${row.webhook_enabled !== false ? "checked" : ""} /></td>` +
             `<td><button type="button" class="secondary" data-del="${i}" ${isAdminRole() ? "" : "disabled"}>删除</button></td>` +
@@ -1330,6 +1332,7 @@
           api_key: ak,
           secret: sk,
           password: "",
+          template_capital_usdt: parseFloat(g("template_capital_usdt")?.value) || 0,
           fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
           enabled: g("enabled")?.checked !== false,
           webhook_enabled: g("webhook_enabled")?.checked !== false,
@@ -1372,6 +1375,7 @@
           secret: "",
           api_key_preview: a.api_key_preview,
           has_secret: a.has_secret,
+          template_capital_usdt: Number(a.template_capital_usdt) || 0,
           fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
           webhook_enabled: a.webhook_enabled !== false,
@@ -1421,6 +1425,7 @@
           secret: "",
           api_key_preview: a.api_key_preview,
           has_secret: a.has_secret,
+          template_capital_usdt: Number(a.template_capital_usdt) || 0,
           fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
           webhook_enabled: a.webhook_enabled !== false,
@@ -1478,6 +1483,7 @@
           `<span>已配置 API 的账户</span> ${api}<br/>` +
           `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
           `<span>TV Webhook 密钥</span> ${wh}<br/>` +
+          `<span>模板本金（USDT）</span> ${Number(d.template_base_capital_usdt) || 0}<br/>` +
           `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}` +
           envLine;
         updateButtons();
@@ -1684,6 +1690,7 @@
         exchange: "binance",
         api_key: "",
         secret: "",
+        template_capital_usdt: 1000,
         fixed_quote_usdt: 500,
         enabled: true,
         webhook_enabled: true,
