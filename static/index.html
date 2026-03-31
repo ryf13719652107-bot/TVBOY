@@ -622,7 +622,7 @@
       <div id="webhookTestPlain" class="balance-plain" style="display: none; margin-top: 0.75rem;"></div>
       <div id="outWebhookTest" class="out" style="display: none; margin-top: 0.5rem;"></div>
       <p class="balance-raw-title" style="margin-top: 1rem;">TV 策略告警消息（自动推断开/加/减/平）</p>
-      <p class="hint" style="margin-top: 0;">在策略的「告警」里使用下方 JSON（须为<strong>合法 JSON</strong>）。本服务会读 <code>action</code>（或 <code>strategy.order.action</code>）与 <code>prev_market_position</code>：在 <strong>合约（BINANCE_DEFAULT_TYPE=future）</strong> 下，若上一笔为多头且本次为 <code>sell</code> 则自动下<strong>仅减仓</strong>；上一笔为空头且本次为 <code>buy</code> 同理。开多/加多、开空/加空为<strong>非仅减仓</strong>。若消息里<strong>显式写了</strong> <code>reduce_only</code>，则以你写的为准。多账户名义仍由各账户「固定 USDT」决定，不必写 <code>quote_amount</code>。</p>
+      <p class="hint" style="margin-top: 0;">在策略的「告警」里使用下方 JSON（须为<strong>合法 JSON</strong>）。本服务会读 <code>action</code>（或 <code>strategy.order.action</code>）与 <code>prev_market_position</code>：在 <strong>合约（BINANCE_DEFAULT_TYPE=future）</strong> 下，若上一笔为多头且本次为 <code>sell</code> 则自动下<strong>仅减仓</strong>；上一笔为空头且本次为 <code>buy</code> 同理。开多/加多、开空/加空为<strong>非仅减仓</strong>。若消息里<strong>显式写了</strong> <code>reduce_only</code>，则以你写的为准。多账户优先按<strong>模板比例</strong>（需服务端配置 <code>TEMPLATE_BASE_CAPITAL_USDT</code>，且告警含 <code>contracts</code>）换算币数；不满足条件时回退为各账户「固定 USDT」。</p>
       <p class="hint" style="margin-top: 0.35rem;">勿在 JSON 里写 <code>{{price}}*0.95</code> 这类非法表达式；你举的第三方模板若含此类字段，需删掉或改成 TV 能展开的数字，否则整段无法解析。</p>
       <p class="hint" style="margin-top: 0.35rem;">全平后撤销止损：仅减仓成交后服务端会<strong>查询币安该合约持仓</strong>，若已空仓则自动取消未触发的止损挂单，<strong>不必改 Pine 策略</strong>；若告警里带有 <code>market_position</code>=flat 等字段也会作为辅助判断。</p>
       <div class="copy-row">
