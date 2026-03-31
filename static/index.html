@@ -988,6 +988,21 @@
       return Number.isFinite(n) ? n : null;
     }
 
+    /** 仅减仓/平仓类成交才展示「估算」盈亏；开仓/加仓不展示，避免截断历史或 key 串线误判。 */
+    function rowShowsEstimatedPnl(row) {
+      if (row.reduce_only === true) return true;
+      const act = String(row.action || "");
+      return /减仓|平仓/.test(act);
+    }
+
+    /** 仓位状态 key：账户 id + 备注 + 规范化品种，避免两账户同名备注混算。 */
+    function pnlStateKey(row) {
+      const aid = String(row.account_id ?? "").trim();
+      const rem = String(row.remark ?? "").trim();
+      const sym = displaySymbolCompact(row.symbol) || String(row.symbol ?? "").trim().toUpperCase();
+      return aid + "\x01" + rem + "\x01" + sym;
+    }
+
     function estimateTradeFeeAndPnl(items) {
       // 展示层估算：
       // 1) fee 统一按 成交价*数量*0.05%；
@@ -1010,7 +1025,7 @@
         }
         if (fee != null) feeByIdx[idx] = fee;
         if (!(dir && qty != null && qty > 0 && px != null && px > 0)) continue;
-        const key = String(row.account_id || row.remark || "") + "|" + String(row.symbol || "");
+        const key = pnlStateKey(row);
         const st = state.get(key) || { pos: 0, avg: 0, openFee: 0 };
         const prevAbs = Math.abs(st.pos);
         if (prevAbs <= 1e-12 || Math.sign(st.pos) === dir) {
@@ -1065,7 +1080,12 @@
         const name = String(row.remark || row.account_id || "未知账户");
         const fee = _numOrNull(est.feeByIdx[idx]) || 0;
         const grossRaw = _numOrNull(row.order_pnl);
-        const gross = grossRaw != null ? grossRaw : (_numOrNull(est.grossPnlByIdx[idx]) || 0);
+        const gross =
+          grossRaw != null
+            ? grossRaw
+            : rowShowsEstimatedPnl(row)
+              ? _numOrNull(est.grossPnlByIdx[idx]) || 0
+              : 0;
         const cur = byAcc.get(aid) || { name, gross: 0, fee: 0 };
         cur.gross += gross;
         cur.fee += fee;
@@ -1131,7 +1151,13 @@
         const tms = row.exchange_timestamp_ms != null ? row.exchange_timestamp_ms : row.ts_ms;
         const tcell = fmtTimeExchangeMs(tms, useBj);
         const feeDisplay = est.feeByIdx[idx];
-        const pnlDisplay = row.order_pnl != null ? row.order_pnl : est.netPnlByIdx[idx];
+        const exchPnl = _numOrNull(row.order_pnl);
+        const pnlDisplay =
+          exchPnl !== null
+            ? exchPnl
+            : rowShowsEstimatedPnl(row)
+              ? est.netPnlByIdx[idx]
+              : null;
         const pnlVal = fmtTradeDecimal(pnlDisplay, 8);
         const pnlCell = pnlVal === "—"
           ? "—"
