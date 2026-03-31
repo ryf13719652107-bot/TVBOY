@@ -1,2 +1,11 @@
-# 网页保存的币安 API（勿提交）
+# 账户/日志数据（含 API Key，勿提交）
 data/
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+# 环境配置（含密钥，勿提交）
+.env
+# 本地虚拟环境
+.venv/
+venv/

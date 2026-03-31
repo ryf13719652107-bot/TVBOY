@@ -3,20 +3,20 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TV → 币安 控制台</title>
+  <title>TV量化机器人</title>
   <style>
     :root {
-      --bg: #f0f2f5;
+      --bg: #eef3ff;
       --card: #ffffff;
-      --border: #d8dee6;
+      --border: #d6e0ee;
       --text: #1a2332;
       --muted: #5c6b7a;
-      --accent: #0284c7;
+      --accent: #2563eb;
       --ok: #059669;
       --err: #dc2626;
       --input-bg: #ffffff;
-      --elevated: #f8fafc;
-      --table-header: #eef2f7;
+      --elevated: #f4f8ff;
+      --table-header: #edf3ff;
       --font: "Segoe UI", system-ui, -apple-system, sans-serif;
       --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
       color-scheme: light;
@@ -26,7 +26,7 @@
       margin: 0;
       min-height: 100vh;
       font-family: var(--font);
-      background: var(--bg);
+      background: radial-gradient(circle at top right, #dbeafe 0%, var(--bg) 35%, #f8fafc 100%);
       color: var(--text);
       line-height: 1.5;
     }
@@ -37,7 +37,7 @@
         padding: 1.5rem 1.25rem 3rem;
       }
     }
-    h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.25rem; letter-spacing: -0.02em; }
+    h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 0.2rem; letter-spacing: -0.02em; color: #0f172a; }
     .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
     .grid { display: grid; gap: 1rem; }
     @media (min-width: 640px) {
@@ -46,9 +46,21 @@
     .card {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 14px;
       padding: 1rem 1.1rem;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      box-shadow: 0 8px 24px rgba(37, 99, 235, 0.07);
+      position: relative;
+      overflow: visible;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #3b82f6, #38bdf8 55%, #22d3ee);
+      opacity: 0.8;
     }
     code {
       background: var(--elevated);
@@ -65,8 +77,20 @@
       margin: 0 0 0.75rem;
       font-weight: 600;
     }
-    .stat { font-size: 0.95rem; }
-    .stat span { color: var(--muted); display: inline-block; min-width: 7rem; }
+    .stat {
+      font-size: 0.92rem;
+      line-height: 1.7;
+      background: #f8fbff;
+      border: 1px solid #d9e5f6;
+      border-radius: 10px;
+      padding: 0.6rem 0.7rem;
+    }
+    .stat span {
+      color: var(--muted);
+      display: inline-block;
+      min-width: 7rem;
+      font-weight: 600;
+    }
     .pill {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -171,17 +195,18 @@
       border: 1px solid var(--border);
       max-height: 420px;
       overflow-y: auto;
+      background: #fdfefe;
     }
     table.siglog {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.72rem;
+      font-size: 0.7rem;
       font-family: var(--mono);
     }
     table.siglog th, table.siglog td {
-      padding: 0.4rem 0.5rem;
+      padding: 0.34rem 0.45rem;
       text-align: left;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid #c7d2fe;
       vertical-align: top;
     }
     table.siglog th {
@@ -194,6 +219,8 @@
       box-shadow: 0 1px 0 var(--border);
     }
     table.siglog tr:last-child td { border-bottom: none; }
+    table.siglog tbody tr:nth-child(even) { background: #fafcff; }
+    table.siglog tbody tr:hover { background: #eff6ff; }
     table.siglog .ok { color: var(--ok); }
     table.siglog .bad { color: var(--err); }
     #accountLogWrap.table-wrap {
@@ -209,7 +236,7 @@
       }
       table.siglog-account-log th,
       table.siglog-account-log td {
-        padding: 0.5rem 0.65rem;
+        padding: 0.42rem 0.55rem;
         vertical-align: middle;
         overflow-wrap: anywhere;
         word-break: break-word;
@@ -244,18 +271,68 @@
     .tab-btn {
       padding: 0.45rem 0.9rem;
       border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--card);
-      color: var(--muted);
+      border: 1px solid #cdd8ea;
+      background: #f8fbff;
+      color: #4b5b72;
       cursor: pointer;
       font-size: 0.875rem;
       font-family: inherit;
     }
-    .tab-btn:hover { color: var(--text); border-color: #94a3b8; }
+    .tab-btn:hover { color: var(--text); border-color: #7aa2f7; background: #eef4ff; }
     .tab-btn.active {
-      border-color: var(--accent);
-      color: var(--accent);
-      background: #e0f2fe;
+      border-color: #3b82f6;
+      color: #1d4ed8;
+      background: #dbeafe;
+      box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.2);
+    }
+    .title-line {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .help-tip {
+      position: relative;
+      display: inline-flex;
+      width: 1rem;
+      height: 1rem;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      line-height: 1;
+      color: #1d4ed8;
+      background: #dbeafe;
+      border: 1px solid #93c5fd;
+      cursor: help;
+      user-select: none;
+    }
+    .help-tip::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      top: calc(100% + 8px);
+      transform: translateX(-50%);
+      width: min(460px, 82vw);
+      white-space: normal;
+      text-transform: none;
+      letter-spacing: normal;
+      font-size: 0.78rem;
+      line-height: 1.52;
+      color: #f8fafc;
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 0.62rem 0.72rem;
+      border: 1px solid #334155;
+      box-shadow: 0 10px 25px rgba(2, 6, 23, 0.35);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      z-index: 9999;
+    }
+    .help-tip:hover::after,
+    .help-tip:focus-visible::after {
+      opacity: 1;
+      visibility: visible;
     }
     .tab-panel { display: none; margin-bottom: 0.5rem; }
     .tab-panel.active { display: block; }
@@ -281,12 +358,12 @@
     table.table-exchange {
       width: 100%;
       border-collapse: collapse;
-      font-size: 0.8125rem;
+      font-size: 0.79rem;
       font-family: var(--font);
     }
     table.table-exchange th,
     table.table-exchange td {
-      padding: 0.6rem 0.55rem;
+      padding: 0.48rem 0.5rem;
       text-align: left;
       border-bottom: 1px solid var(--border);
       vertical-align: middle;
@@ -304,9 +381,27 @@
     table.table-exchange tbody tr:last-child td {
       border-bottom: none;
     }
+    table.table-exchange tbody tr:nth-child(even) {
+      background: #fafcff;
+    }
+    table.table-exchange tbody tr:hover {
+      background: #eff6ff;
+    }
     table.table-exchange td.mono {
       font-family: var(--mono);
       font-variant-numeric: tabular-nums;
+    }
+    table.table-exchange th:nth-child(4),
+    table.table-exchange th:nth-child(5),
+    table.table-exchange th:nth-child(6),
+    table.table-exchange th:nth-child(7),
+    table.table-exchange td:nth-child(4),
+    table.table-exchange td:nth-child(5),
+    table.table-exchange td:nth-child(6),
+    table.table-exchange td:nth-child(7) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-family: var(--mono);
     }
     .trade-badge {
       display: inline-block;
@@ -322,14 +417,24 @@
     }
     .trade-badge.buy { background: #22c55e; }
     .trade-badge.sell { background: #ef4444; }
-    .pnl-up { color: #22c55e; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-    .pnl-down { color: #ef4444; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .pnl-up {
+      color: #16a34a;
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+    .pnl-down {
+      color: #dc2626;
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>TradingView → 币安</h1>
-    <p class="sub">多账户跟单 · 固定名义 · 按账户查看运行日志</p>
+    <h1>TV量化机器人</h1>
+    <p class="sub">多账户自动执行 · 轻量控制台 · 交易优先</p>
 
     <nav class="tabs" role="tablist" aria-label="主菜单">
       <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
@@ -343,11 +448,11 @@
     <div id="panel-overview" class="tab-panel active" role="tabpanel">
     <div class="grid grid-2" style="margin-bottom: 1rem;">
       <div class="card">
-        <h2>运行状态</h2>
+        <h2 class="title-line">运行状态 <span class="help-tip" tabindex="0" data-tip="显示当前模式、权限、账户数量、密钥配置与模板本金。用于快速确认机器人是否处于可交易状态。">?</span></h2>
         <div id="statusBox" class="stat">加载中…</div>
       </div>
       <div class="card">
-        <h2>访问密钥</h2>
+        <h2 class="title-line">访问密钥 <span class="help-tip" tabindex="0" data-tip="输入 DASHBOARD_SECRET（主密钥）或 DASHBOARD_VIEWER_SECRET（只读密钥）。密钥只保存在浏览器本地。">?</span></h2>
         <label for="secret">与 <code>.env</code> 中 <strong>DASHBOARD_SECRET</strong> 或 <strong>TV_WEBHOOK_SECRET</strong> 一致（仅存浏览器）</label>
         <input id="secret" type="password" autocomplete="off" placeholder="保存密钥后使用各页功能" />
         <div class="row" style="margin-top: 0.5rem;">
@@ -358,8 +463,7 @@
       </div>
     </div>
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>开仓后止损（合约）</h2>
-      <p class="hint" style="margin-top: 0;">开启后，每次<strong>非仅减仓</strong>的市价成交完毕，会按成交数量挂止损单（优先 STOP 限价触发，失败则 STOP_MARKET）。<strong>所有账户</strong>在各自 API 上独立挂单。仅 <code>BINANCE_DEFAULT_TYPE=future</code> 时生效。</p>
+      <h2 class="title-line">开仓后止损（合约） <span class="help-tip" tabindex="0" data-tip="开启后，非 reduce_only 的开仓/加仓成交完成会自动挂止损。优先 STOP，失败回退 STOP_MARKET。仅 BINANCE_DEFAULT_TYPE=future 生效。">?</span></h2>
       <div class="row" style="margin-top: 0.5rem; align-items: center;">
         <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;margin-top:1.25rem;">
           <input type="checkbox" id="stopLossEnabled" /> 开启止损挂单
@@ -373,15 +477,14 @@
           <button type="button" class="secondary" id="btnSaveBotSettings" disabled>保存止损设置</button>
         </div>
       </div>
-      <p class="hint" style="margin-top: 0.5rem;">默认 3.33%；设置保存在服务器 <code>data/bot_settings.json</code>。平仓/减仓（<code>reduce_only</code>）不会挂止损；全平后服务端会按<strong>交易所持仓是否已空</strong>自动撤未触发止损（无需改 Pine）。</p>
+      <p class="hint" style="margin-top: 0.5rem;">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
     </div>
     <p id="healthLine" class="health-strip">近 24 小时失败次数：—（保存密钥并打开「运行日志」后更新）</p>
     </div>
 
     <div id="panel-accounts" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>交易账户</h2>
-      <p class="hint" style="margin-top: 0;">优先按<strong>模板比例</strong>下单（TV 发送 <code>contracts</code> 且服务端配置模板本金时）：账户下单量 = TV contracts × (账户模板本金 / 模板本金)。不满足条件时回退为每账户固定 USDT。</p>
+      <h2 class="title-line">交易账户 <span class="help-tip" tabindex="0" data-tip="支持 Binance / Hyperliquid。优先模板比例下单：账户下单量 = TV contracts × (账户模板本金/模板本金)；不满足条件回退固定 USDT。Hyperliquid: API Key=walletAddress，Secret=privateKey。">?</span></h2>
       <p class="hint" id="accountsHint" style="margin-top: 0.35rem;">请先填写并保存「访问密钥」。</p>
       <div class="table-wrap" id="accountsTableWrap" style="display: none; max-height: none;">
         <table class="siglog" id="accountsTable" style="font-size: 0.78rem;">
@@ -411,8 +514,7 @@
 
     <div id="panel-balance" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>USDT 余额</h2>
-      <p class="hint" style="margin-top: 0;">选「全部账户」时<strong>下方展示每个账户</strong>的合约/现货 USDT；选单个账户只查该户。进入本页或切换下拉时会<strong>自动查询</strong>。</p>
+      <h2 class="title-line">稳定币余额 <span class="help-tip" tabindex="0" data-tip="可查看全部账户或单账户余额。Binance 常见 USDT，Hyperliquid 常见 USDC。进入本页或切换账户会自动刷新。">?</span></h2>
       <div class="row" style="margin-bottom: 0.65rem;">
         <div>
           <label for="accountSelectBalance">账户</label>
@@ -431,7 +533,7 @@
     </div>
 
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>手动测试下单</h2>
+      <h2 class="title-line">手动测试下单 <span class="help-tip" tabindex="0" data-tip="用于小额联调。建议先测试网或最小仓位。按固定 USDT 时，会读取该账户在交易账户里的固定 USDT 设置。">?</span></h2>
       <div class="row">
         <div>
           <label for="accountSelectOrder">交易账户</label>
@@ -472,7 +574,7 @@
       <div class="row" style="margin-top: 0.75rem;">
         <button type="button" id="btnOrder" disabled>发送市价单（真实下单）</button>
       </div>
-      <p class="hint">选「按账户固定 USDT」时，名义以该账户在「交易账户」里填的<strong>固定 USDT</strong>为准。请先用测试网或小金额验证；合约需满足交易所最低名义。</p>
+      <p class="hint">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
       <div id="orderPlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
       <p style="margin: 0.5rem 0 0; display: none;" id="orderToggleWrap">
         <button type="button" class="btn-link" id="btnToggleOrderRaw">显示完整返回</button>
@@ -484,8 +586,7 @@
 
     <div id="panel-logs" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>运行日志</h2>
-      <p class="hint" style="margin-top: 0;">机器人执行记录（Webhook / 手动试单）保存在服务器 <code>data/execution_log.json</code>，<strong>不自动删除</strong>。</p>
+      <h2 class="title-line">运行日志 <span class="help-tip" tabindex="0" data-tip="执行记录热数据保存在 data/execution_log.jsonl，超出上限自动归档到 data/execution_log.archive.jsonl。可勾选包含归档查看更早历史。">?</span></h2>
       <div class="row" style="margin-top: 0.5rem;">
         <div>
           <label for="accountLogFilter">筛选账户</label>
@@ -508,8 +609,11 @@
         <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
           <input type="checkbox" id="accountLogTzBeijing" checked /> 时间显示为北京时间
         </label>
+        <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
+          <input type="checkbox" id="accountLogIncludeArchive" /> 包含归档（较慢）
+        </label>
       </div>
-      <p class="hint" style="margin-top:0.35rem;font-size:0.78rem;">Webhook 聚合信号另存 <code>data/signal_log.json</code>。</p>
+      <p class="hint" style="margin-top:0.35rem;font-size:0.78rem;">Webhook 聚合信号热数据另存 <code>data/signal_log.jsonl</code>（归档同目录）。</p>
       <div class="row" style="margin-top: 0.35rem;">
         <div>
           <label>&nbsp;</label>
@@ -551,8 +655,7 @@
 
     <div id="panel-trades" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>交易记录</h2>
-      <p class="hint" style="margin-top: 0;">仅展示<strong>本机器人</strong>产生的执行记录（Webhook / 控制台试单），数据来自 <code>data/execution_log.json</code>。<strong>仅合约</strong>（<code>BINANCE_DEFAULT_TYPE=future</code> 时与现货无关）；不含交易所里手动下的单。</p>
+      <h2 class="title-line">交易记录 <span class="help-tip" tabindex="0" data-tip="仅展示机器人产生的执行记录（Webhook/手动），不包含交易所手工下单。默认查热日志，勾选包含归档可查更久历史。">?</span></h2>
       <div class="row" style="margin-top: 0.5rem;">
         <div>
           <label for="accountSelectTradeService">账户</label>
@@ -588,8 +691,23 @@
         <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
           <input type="checkbox" id="tradeTzBeijing" checked /> 时间显示为北京时间
         </label>
+        <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.85rem;color:var(--muted);margin-top:1.5rem;">
+          <input type="checkbox" id="tradeIncludeArchive" /> 包含归档（较慢）
+        </label>
       </div>
       <p id="tradeServiceHint" class="hint" style="margin-top: 0.5rem;"></p>
+      <div class="table-wrap" id="tradeServiceSummaryWrap" style="display:none; margin-top: 0.5rem; max-height: none;">
+        <table class="siglog" aria-label="账户收益汇总" style="font-size:0.8rem;">
+          <thead>
+            <tr>
+              <th>账户</th>
+              <th>总收益(USDT)</th>
+              <th>扣手续费后总收益(USDT)</th>
+            </tr>
+          </thead>
+          <tbody id="tradeServiceSummaryBody"></tbody>
+        </table>
+      </div>
       <div class="table-exchange-wrap" id="tradeServiceWrap" style="display: none;">
         <table class="table-exchange" aria-label="机器人合约执行记录">
           <thead>
@@ -612,8 +730,8 @@
 
     <div id="panel-tv" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2>TradingView 与模拟 Webhook</h2>
-      <p class="hint" style="margin-top: 0;">告警 URL：<code id="webhookHint">https://你的域名/webhook</code>（Header <code>X-TV-Secret</code> 与 .env 一致）。以下为与 TV 相同格式的测试请求，会真实下单。</p>
+      <h2 class="title-line">TradingView 与模拟 Webhook <span class="help-tip" tabindex="0" data-tip="告警 URL 填 /webhook，Header 的 X-TV-Secret 需与 .env 一致。此处模拟请求为真实下单，建议先小仓位验证。">?</span></h2>
+      <p class="hint" style="margin-top: 0;">告警 URL：<code id="webhookHint">https://你的域名/webhook</code></p>
       <label for="webhookTestBody">消息体 JSON</label>
       <textarea id="webhookTestBody" style="min-height: 88px;">{"action":"buy","symbol":"ETHUSDT","quote_amount":1000}</textarea>
       <div class="row" style="margin-top: 0.65rem;">
@@ -622,9 +740,7 @@
       <div id="webhookTestPlain" class="balance-plain" style="display: none; margin-top: 0.75rem;"></div>
       <div id="outWebhookTest" class="out" style="display: none; margin-top: 0.5rem;"></div>
       <p class="balance-raw-title" style="margin-top: 1rem;">TV 策略告警消息（自动推断开/加/减/平）</p>
-      <p class="hint" style="margin-top: 0;">在策略的「告警」里使用下方 JSON（须为<strong>合法 JSON</strong>）。本服务会读 <code>action</code>（或 <code>strategy.order.action</code>）与 <code>prev_market_position</code>：在 <strong>合约（BINANCE_DEFAULT_TYPE=future）</strong> 下，若上一笔为多头且本次为 <code>sell</code> 则自动下<strong>仅减仓</strong>；上一笔为空头且本次为 <code>buy</code> 同理。开多/加多、开空/加空为<strong>非仅减仓</strong>。若消息里<strong>显式写了</strong> <code>reduce_only</code>，则以你写的为准。多账户优先按<strong>模板比例</strong>（需服务端配置 <code>TEMPLATE_BASE_CAPITAL_USDT</code>，且告警含 <code>contracts</code>）换算币数；不满足条件时回退为各账户「固定 USDT」。</p>
-      <p class="hint" style="margin-top: 0.35rem;">勿在 JSON 里写 <code>{{price}}*0.95</code> 这类非法表达式；你举的第三方模板若含此类字段，需删掉或改成 TV 能展开的数字，否则整段无法解析。</p>
-      <p class="hint" style="margin-top: 0.35rem;">全平后撤销止损：仅减仓成交后服务端会<strong>查询币安该合约持仓</strong>，若已空仓则自动取消未触发的止损挂单，<strong>不必改 Pine 策略</strong>；若告警里带有 <code>market_position</code>=flat 等字段也会作为辅助判断。</p>
+      <p class="hint" style="margin-top: 0.35rem;">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
       <div class="copy-row">
         <textarea id="tplTvStrategyWebhook" readonly style="min-height: 140px; font-size: 0.78rem;">{
   "ticker": "{{ticker}}",
@@ -657,6 +773,8 @@
     const accountLogWrap = document.getElementById("accountLogWrap");
     const accountLogHint = document.getElementById("accountLogHint");
     const accountLogTzBeijing = document.getElementById("accountLogTzBeijing");
+    const accountLogIncludeArchive = document.getElementById("accountLogIncludeArchive");
+    const tradeIncludeArchive = document.getElementById("tradeIncludeArchive");
     const healthLine = document.getElementById("healthLine");
     const btnSaveAccounts = document.getElementById("btnSaveAccounts");
     const btnAddAccount = document.getElementById("btnAddAccount");
@@ -800,6 +918,9 @@
       try {
         const qs = new URLSearchParams();
         if (aid) qs.set("account_id", aid);
+        if (accountLogIncludeArchive && accountLogIncludeArchive.checked) {
+          qs.set("include_archive", "1");
+        }
         qs.set("limit", "50000");
         const r = await fetch("/api/account-log?" + qs.toString(), {
           headers: { "X-TV-Secret": getSecret() },
@@ -861,6 +982,122 @@
       return s.toUpperCase();
     }
 
+    function _numOrNull(v) {
+      if (v == null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function estimateTradeFeeAndPnl(items) {
+      // 展示层估算：
+      // 1) fee 统一按 成交价*数量*0.05%；
+      // 2) pnl 缺失时，按同账户同品种的净仓开平估算已实现收益。
+      const feeByIdx = {};
+      const grossPnlByIdx = {};
+      const netPnlByIdx = {};
+      const state = new Map(); // key -> { pos, avg, openFee }
+      const chronological = items.map((row, idx) => ({ row, idx })).reverse();
+      for (const it of chronological) {
+        const row = it.row || {};
+        const idx = it.idx;
+        const side = String(row.side || "").toLowerCase();
+        const dir = side === "buy" ? 1 : side === "sell" ? -1 : 0;
+        const qty = _numOrNull(row.order_filled);
+        const px = _numOrNull(row.order_average);
+        let fee = null;
+        if (qty != null && qty > 0 && px != null && px > 0) {
+          fee = Math.abs(px * qty * 0.0005);
+        }
+        if (fee != null) feeByIdx[idx] = fee;
+        if (!(dir && qty != null && qty > 0 && px != null && px > 0)) continue;
+        const key = String(row.account_id || row.remark || "") + "|" + String(row.symbol || "");
+        const st = state.get(key) || { pos: 0, avg: 0, openFee: 0 };
+        const prevAbs = Math.abs(st.pos);
+        if (prevAbs <= 1e-12 || Math.sign(st.pos) === dir) {
+          const newAbs = prevAbs + qty;
+          st.avg = prevAbs > 0 ? (st.avg * prevAbs + px * qty) / newAbs : px;
+          st.pos = dir * newAbs;
+          st.openFee += fee || 0;
+          state.set(key, st);
+          continue;
+        }
+        const closeQty = Math.min(prevAbs, qty);
+        const feePerQty = (fee || 0) / qty;
+        const closeFee = feePerQty * closeQty;
+        const openFeeAlloc = prevAbs > 0 ? st.openFee * (closeQty / prevAbs) : 0;
+        const rawPnl = st.pos > 0 ? (px - st.avg) * closeQty : (st.avg - px) * closeQty;
+        grossPnlByIdx[idx] = rawPnl;
+        netPnlByIdx[idx] = rawPnl - closeFee - openFeeAlloc;
+        st.openFee = Math.max(0, st.openFee - openFeeAlloc);
+        const remainQty = qty - closeQty;
+        if (remainQty > 1e-12) {
+          const openFeePart = (fee || 0) - closeFee;
+          st.pos = dir * remainQty;
+          st.avg = px;
+          st.openFee = openFeePart;
+        } else {
+          const leftAbs = prevAbs - closeQty;
+          if (leftAbs <= 1e-12) {
+            st.pos = 0;
+            st.avg = 0;
+            st.openFee = 0;
+          } else {
+            st.pos = Math.sign(st.pos) * leftAbs;
+          }
+        }
+        state.set(key, st);
+      }
+      return { feeByIdx, grossPnlByIdx, netPnlByIdx };
+    }
+
+    function renderExchangeTradeAccountSummary(items, est) {
+      const wrap = document.getElementById("tradeServiceSummaryWrap");
+      const body = document.getElementById("tradeServiceSummaryBody");
+      if (!wrap || !body) return;
+      if (!items || items.length === 0) {
+        wrap.style.display = "none";
+        body.innerHTML = "";
+        return;
+      }
+      const byAcc = new Map();
+      items.forEach((row, idx) => {
+        const aid = String(row.account_id || row.remark || "unknown");
+        const name = String(row.remark || row.account_id || "未知账户");
+        const fee = _numOrNull(est.feeByIdx[idx]) || 0;
+        const grossRaw = _numOrNull(row.order_pnl);
+        const gross = grossRaw != null ? grossRaw : (_numOrNull(est.grossPnlByIdx[idx]) || 0);
+        const cur = byAcc.get(aid) || { name, gross: 0, fee: 0 };
+        cur.gross += gross;
+        cur.fee += fee;
+        byAcc.set(aid, cur);
+      });
+      let totalGross = 0;
+      let totalFee = 0;
+      const rows = [];
+      for (const [, v] of byAcc) {
+        totalGross += v.gross;
+        totalFee += v.fee;
+        const net = v.gross - v.fee;
+        rows.push(
+          `<tr>` +
+          `<td>${escHtml(v.name)}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(v.gross, 8))}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(net, 8))}</td>` +
+          `</tr>`
+        );
+      }
+      const totalNet = totalGross - totalFee;
+      rows.push(
+        `<tr>` +
+        `<td><strong>全账户合计</strong></td>` +
+        `<td class="mono"><strong>${escHtml(fmtTradeDecimal(totalGross, 8))}</strong></td>` +
+        `<td class="mono"><strong>${escHtml(fmtTradeDecimal(totalNet, 8))}</strong></td>` +
+        `</tr>`
+      );
+      body.innerHTML = rows.join("");
+      wrap.style.display = "block";
+    }
+
     function renderExchangeTradesTable(items, hintText) {
       const body = document.getElementById("tradeServiceBody");
       const wrap = document.getElementById("tradeServiceWrap");
@@ -875,7 +1112,9 @@
         return;
       }
       wrap.style.display = "block";
-      const rows = items.map((row) => {
+      const est = estimateTradeFeeAndPnl(items);
+      renderExchangeTradeAccountSummary(items, est);
+      const rows = items.map((row, idx) => {
         const side = String(row.side || "").toLowerCase();
         const badge =
           side === "buy"
@@ -891,14 +1130,19 @@
         const oid = row.order_id ? String(row.order_id) : "—";
         const tms = row.exchange_timestamp_ms != null ? row.exchange_timestamp_ms : row.ts_ms;
         const tcell = fmtTimeExchangeMs(tms, useBj);
-        const pnlCell = "";
+        const feeDisplay = est.feeByIdx[idx];
+        const pnlDisplay = row.order_pnl != null ? row.order_pnl : est.netPnlByIdx[idx];
+        const pnlVal = fmtTradeDecimal(pnlDisplay, 8);
+        const pnlCell = pnlVal === "—"
+          ? "—"
+          : `<span class="${Number(pnlDisplay) >= 0 ? "pnl-up" : "pnl-down"}">${escHtml(pnlVal)}</span>`;
         return (
           `<tr><td class="mono">${escHtml(oid)}</td>` +
           `<td>${escHtml(src)}</td>` +
           `<td>${pairCell}</td>` +
           `<td class="mono">${escHtml(fmtTradeDecimal(row.order_average, 8))}</td>` +
           `<td class="mono">${escHtml(fmtTradeDecimal(row.order_filled, 8))}</td>` +
-          `<td class="mono">${escHtml(fmtTradeDecimal(row.order_fee, 8))}</td>` +
+          `<td class="mono">${escHtml(fmtTradeDecimal(feeDisplay, 8))}</td>` +
           `<td>${pnlCell}</td>` +
           `<td class="mono">${escHtml(tcell)}</td></tr>`
         );
@@ -926,6 +1170,9 @@
         qs.set("limit", String(lim));
         if (aid) qs.set("account_id", aid);
         if (sym) qs.set("symbol", sym);
+        if (tradeIncludeArchive && tradeIncludeArchive.checked) {
+          qs.set("include_archive", "1");
+        }
         const r = await fetch("/api/account-log?" + qs.toString(), {
           headers: { "X-TV-Secret": getSecret() },
         });
@@ -1063,11 +1310,12 @@
             const err = u && u.error ? esc(String(u.error)) : "无数据";
             return `<div class="row-line"><strong>${esc(title)}</strong>：${err}</div>`;
           }
+          const ccy = esc(String(u.currency || "USDT"));
           return (
             `<div class="row-line"><strong>${esc(title)}</strong></div>` +
-            `<div class="row-line">余额（总权益）<span class="num">${fmtU(u.total)}</span> USDT</div>` +
-            `<div class="row-line">可用余额 <span class="num">${fmtU(u.free)}</span> USDT</div>` +
-            `<div class="row-line">占用（保证金等）<span class="num">${fmtU(u.used)}</span> USDT</div>`
+            `<div class="row-line">余额（总权益）<span class="num">${fmtU(u.total)}</span> ${ccy}</div>` +
+            `<div class="row-line">可用余额 <span class="num">${fmtU(u.free)}</span> ${ccy}</div>` +
+            `<div class="row-line">占用（保证金等）<span class="num">${fmtU(u.used)}</span> ${ccy}</div>`
           );
         };
         if (d.accounts && d.accounts.length) {
@@ -1284,7 +1532,10 @@
           return (
             `<tr data-idx="${i}" data-id="${escHtml(rid)}">` +
             `<td><input type="text" name="remark" value="${escHtml(row.remark || "")}" style="width:100%;min-width:5rem" /></td>` +
-            `<td><select name="exchange"><option value="binance">Binance</option></select></td>` +
+            `<td><select name="exchange">` +
+            `<option value="binance" ${((row.exchange || "binance") === "binance") ? "selected" : ""}>Binance</option>` +
+            `<option value="hyperliquid" ${((row.exchange || "binance") === "hyperliquid") ? "selected" : ""}>Hyperliquid</option>` +
+            `</select></td>` +
             `<td><input type="text" name="api_key" placeholder="${phK}" value="${escHtml(row.api_key || "")}" style="width:100%;min-width:6rem" autocomplete="off" /></td>` +
             `<td><input type="password" name="secret" placeholder="${phS}" value="" autocomplete="off" style="width:100%;min-width:5rem" /></td>` +
             `<td><input type="number" name="template_capital_usdt" step="0.01" min="0" value="${Number(row.template_capital_usdt) || 0}" style="width:6.5rem" /></td>` +
@@ -1826,9 +2077,19 @@
         loadAccountLog();
       });
     }
+    if (accountLogIncludeArchive) {
+      accountLogIncludeArchive.addEventListener("change", () => {
+        loadAccountLog();
+      });
+    }
     const tradeTzBeijingEl = document.getElementById("tradeTzBeijing");
     if (tradeTzBeijingEl) {
       tradeTzBeijingEl.addEventListener("change", () => {
+        loadExchangeTrades();
+      });
+    }
+    if (tradeIncludeArchive) {
+      tradeIncludeArchive.addEventListener("change", () => {
         loadExchangeTrades();
       });
     }

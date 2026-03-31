@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,10 +43,22 @@ _RUNTIME_BINANCE_PATH = Path(__file__).resolve().parent / "data" / "binance_cred
 _ACCOUNTS_PATH = Path(__file__).resolve().parent / "data" / "accounts.json"
 _EXECUTION_LOG_PATH = Path(__file__).resolve().parent / "data" / "execution_log.json"
 _SIGNAL_LOG_PATH = Path(__file__).resolve().parent / "data" / "signal_log.json"
+_EXECUTION_LOG_JSONL_PATH = Path(__file__).resolve().parent / "data" / "execution_log.jsonl"
+_SIGNAL_LOG_JSONL_PATH = Path(__file__).resolve().parent / "data" / "signal_log.jsonl"
+_EXECUTION_ARCHIVE_JSONL_PATH = (
+    Path(__file__).resolve().parent / "data" / "execution_log.archive.jsonl"
+)
+_SIGNAL_ARCHIVE_JSONL_PATH = (
+    Path(__file__).resolve().parent / "data" / "signal_log.archive.jsonl"
+)
 _BOT_SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "bot_settings.json"
 
 _exchange_cache: dict[str, Any] = {}
 _exchange_cache_lock = threading.Lock()
+_account_trade_locks: dict[str, threading.Lock] = {}
+_account_trade_locks_lock = threading.Lock()
+_webhook_finalize_executor: ThreadPoolExecutor | None = None
+_webhook_finalize_executor_lock = threading.Lock()
 
 
 def _load_runtime_binance() -> tuple[str, str]:
@@ -119,6 +132,28 @@ def _account_by_id(aid: str) -> dict[str, Any] | None:
     return None
 
 
+def _get_account_trade_lock(aid: str) -> threading.Lock:
+    key = str(aid or "")
+    with _account_trade_locks_lock:
+        lock = _account_trade_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _account_trade_locks[key] = lock
+        return lock
+
+
+def _get_webhook_finalize_executor() -> ThreadPoolExecutor:
+    global _webhook_finalize_executor
+    with _webhook_finalize_executor_lock:
+        if _webhook_finalize_executor is None:
+            workers = max(1, WEBHOOK_FINALIZE_MAX_WORKERS)
+            _webhook_finalize_executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="webhook-finalize",
+            )
+        return _webhook_finalize_executor
+
+
 def _mask_api_key(k: str) -> str:
     k = k.strip()
     if not k:
@@ -126,6 +161,13 @@ def _mask_api_key(k: str) -> str:
     if len(k) <= 8:
         return "****"
     return f"{k[:4]}…{k[-4:]}"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
@@ -148,8 +190,22 @@ PRELOAD_MARKETS_ON_STARTUP = (
 USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
 # Webhook 下单后非关键后处理延迟秒数（止损/撤单/日志落盘）
 WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
+# Webhook 多账户并发下单线程上限（默认 8）
+WEBHOOK_TRADE_MAX_WORKERS = _env_int("WEBHOOK_TRADE_MAX_WORKERS", 8)
+# Webhook 后处理线程池大小（默认 4）
+WEBHOOK_FINALIZE_MAX_WORKERS = _env_int("WEBHOOK_FINALIZE_MAX_WORKERS", 4)
+# Webhook 是否打印完整 payload 日志（速度优先建议 false）
+WEBHOOK_LOG_PAYLOAD = os.getenv("WEBHOOK_LOG_PAYLOAD", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 # 查询余额短缓存秒数：降低前端高频点按对交易网络请求的干扰；0 表示关闭缓存
 BALANCE_CACHE_TTL_SEC = float(os.getenv("BALANCE_CACHE_TTL_SEC", "2"))
+# 热日志上限（超出后自动归档到 *.archive.jsonl）
+LOG_HOT_MAX_EXECUTION = _env_int("LOG_HOT_MAX_EXECUTION", 50000)
+LOG_HOT_MAX_SIGNAL = _env_int("LOG_HOT_MAX_SIGNAL", 20000)
 
 # Webhook 聚合信号 / 按账户执行记录：持久化到 data/*.json，不自动删除条数、不自动清空
 ACCOUNT_LOG_QUERY_MAX = 50000
@@ -175,6 +231,59 @@ def _load_persisted_json_list(path: Path, key: str = "items") -> list[dict[str, 
         return []
 
 
+def _load_persisted_jsonl_list(path: Path) -> list[dict[str, Any]]:
+    try:
+        if not path.is_file():
+            return []
+        rows: list[dict[str, Any]] = []
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    rows.append(obj)
+        rows.reverse()
+        return rows
+    except Exception as e:
+        logger.warning("读取 %s 失败: %s", path, e)
+        return []
+
+
+def _append_jsonl_row(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _rewrite_jsonl_from_newest(path: Path, rows_newest_first: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for row in reversed(rows_newest_first):
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    tmp.replace(path)
+
+
+def _delete_rows_in_jsonl(path: Path, should_delete) -> int:
+    rows = _load_persisted_jsonl_list(path)
+    if not rows:
+        return 0
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for row in rows:
+        if should_delete(row):
+            removed += 1
+        else:
+            kept.append(row)
+    _rewrite_jsonl_from_newest(path, kept)
+    return removed
+
+
 def _save_execution_log() -> None:
     _EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _EXECUTION_LOG_PATH.with_suffix(".tmp")
@@ -182,6 +291,7 @@ def _save_execution_log() -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp.replace(_EXECUTION_LOG_PATH)
+    _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, _account_log)
 
 
 def _save_signal_log() -> None:
@@ -191,14 +301,49 @@ def _save_signal_log() -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp.replace(_SIGNAL_LOG_PATH)
+    _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, _signal_log)
+
+
+def _trim_hot_logs_locked(kind: str) -> None:
+    if kind == "execution":
+        max_keep = max(1, LOG_HOT_MAX_EXECUTION)
+        hot = _account_log
+        archive_path = _EXECUTION_ARCHIVE_JSONL_PATH
+        save_fn = _save_execution_log
+    else:
+        max_keep = max(1, LOG_HOT_MAX_SIGNAL)
+        hot = _signal_log
+        archive_path = _SIGNAL_ARCHIVE_JSONL_PATH
+        save_fn = _save_signal_log
+    if len(hot) <= max_keep:
+        return
+    overflow = hot[max_keep:]
+    if overflow:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(archive_path, "a", encoding="utf-8") as f:
+            for row in reversed(overflow):
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    del hot[max_keep:]
+    save_fn()
 
 
 def _reload_persisted_logs() -> None:
     global _account_log, _signal_log
-    _account_log = _load_persisted_json_list(_EXECUTION_LOG_PATH)
-    _signal_log = _load_persisted_json_list(_SIGNAL_LOG_PATH)
+    _account_log = _load_persisted_jsonl_list(_EXECUTION_LOG_JSONL_PATH)
+    _signal_log = _load_persisted_jsonl_list(_SIGNAL_LOG_JSONL_PATH)
+    if not _account_log:
+        _account_log = _load_persisted_json_list(_EXECUTION_LOG_PATH)
+        if _account_log:
+            _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, _account_log)
+    if not _signal_log:
+        _signal_log = _load_persisted_json_list(_SIGNAL_LOG_PATH)
+        if _signal_log:
+            _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, _signal_log)
     if _backfill_account_log_latency_from_signal_log():
         _save_execution_log()
+    with _LOG_LOCK:
+        _trim_hot_logs_locked("execution")
+        _trim_hot_logs_locked("signal")
 
 
 def _backfill_account_log_latency_from_signal_log() -> bool:
@@ -413,7 +558,9 @@ def _maybe_place_stop_loss_after_market(
     market_order: dict[str, Any],
     reduce_only: bool,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """市价成交后挂止损；仅合约、非仅减仓、且开关开启时。"""
+    """市价成交后挂止损；当前仅 binance 合约支持。"""
+    if not _is_binance_exchange(exchange):
+        return None, None
     bs = load_bot_settings()
     if not bs.get("stop_loss_enabled"):
         return None, None
@@ -546,7 +693,7 @@ def cancel_open_stop_loss_algo_orders(
     """
     取消该合约上未触发的 CONDITIONAL STOP / STOP_MARKET 且 reduceOnly 的挂单（机器人挂的止损）。
     """
-    if BINANCE_DEFAULT_TYPE != "future":
+    if BINANCE_DEFAULT_TYPE != "future" or not _is_binance_exchange(exchange):
         return [], None
     if not unified_symbol:
         return [], "缺少 symbol"
@@ -770,7 +917,8 @@ def record_webhook_signal(
         break
     with _LOG_LOCK:
         _signal_log.insert(0, entry)
-        _save_signal_log()
+        _append_jsonl_row(_SIGNAL_LOG_JSONL_PATH, entry)
+        _trim_hot_logs_locked("signal")
         _record_account_rows_from_webhook(
             payload,
             account_results,
@@ -838,6 +986,10 @@ def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
     ff = _f(filled)
     if ff is not None and ff > 0:
         out["order_filled"] = ff
+    amt = _f(order.get("amount"))
+    if amt is not None and amt > 0 and "order_filled" not in out:
+        # 部分交易所市价单立即返回可能无 filled，先回退展示下单数量
+        out["order_filled"] = amt
 
     fee = order.get("fee")
     if isinstance(fee, dict) and fee.get("cost") is not None:
@@ -880,6 +1032,16 @@ def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
             and "order_average" not in out
         ):
             out["order_average"] = cq / exq2
+        # Hyperliquid 成交回报常见字段
+        sz = _f(info.get("sz"))
+        if sz is not None and sz > 0 and "order_filled" not in out:
+            out["order_filled"] = sz
+        hfee = _f(info.get("fee"))
+        if hfee is not None and hfee >= 0 and "order_fee" not in out:
+            out["order_fee"] = hfee
+        hpnl = _f(info.get("closedPnl"))
+        if hpnl is not None:
+            out["order_pnl"] = hpnl
 
     cost = _f(order.get("cost"))
     filled2 = out.get("order_filled") or _f(order.get("filled"))
@@ -940,7 +1102,8 @@ def _append_account_log_row(**kwargs: Any) -> None:
     }
     with _LOG_LOCK:
         _account_log.insert(0, row)
-        _save_execution_log()
+        _append_jsonl_row(_EXECUTION_LOG_JSONL_PATH, row)
+        _trim_hot_logs_locked("execution")
 
 
 def _record_account_rows_from_webhook(
@@ -1018,7 +1181,7 @@ def _record_account_rows_from_webhook(
 
 def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
     now_ms = time.time() * 1000
-    cutoff = now_ms - 86400000 * 1000
+    cutoff = now_ms - 86400000
     n = 0
     for e in logs:
         if not e.get("ok") and (e.get("ts_ms") or 0) >= cutoff:
@@ -1031,7 +1194,8 @@ def refresh_env() -> None:
     global WEBHOOK_SECRET, DASHBOARD_SECRET, DASHBOARD_VIEWER_SECRET
     global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, TEMPLATE_BASE_CAPITAL_USDT
     global USE_TESTNET, WEBHOOK_POST_DELAY_SEC, PRELOAD_MARKETS_ON_STARTUP
-    global BALANCE_CACHE_TTL_SEC
+    global BALANCE_CACHE_TTL_SEC, WEBHOOK_TRADE_MAX_WORKERS, WEBHOOK_FINALIZE_MAX_WORKERS, WEBHOOK_LOG_PAYLOAD
+    global LOG_HOT_MAX_EXECUTION, LOG_HOT_MAX_SIGNAL
     load_dotenv(_env, override=True)
     WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
     DASHBOARD_SECRET = (os.getenv("DASHBOARD_SECRET") or "").strip()
@@ -1041,7 +1205,17 @@ def refresh_env() -> None:
     TEMPLATE_BASE_CAPITAL_USDT = float(os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0"))
     USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
     WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
+    WEBHOOK_TRADE_MAX_WORKERS = _env_int("WEBHOOK_TRADE_MAX_WORKERS", 8)
+    WEBHOOK_FINALIZE_MAX_WORKERS = _env_int("WEBHOOK_FINALIZE_MAX_WORKERS", 4)
+    WEBHOOK_LOG_PAYLOAD = os.getenv("WEBHOOK_LOG_PAYLOAD", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     BALANCE_CACHE_TTL_SEC = float(os.getenv("BALANCE_CACHE_TTL_SEC", "2"))
+    LOG_HOT_MAX_EXECUTION = _env_int("LOG_HOT_MAX_EXECUTION", 50000)
+    LOG_HOT_MAX_SIGNAL = _env_int("LOG_HOT_MAX_SIGNAL", 20000)
     PRELOAD_MARKETS_ON_STARTUP = (
         os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
         in ("1", "true", "yes", "on")
@@ -1065,9 +1239,18 @@ def preload_trade_markets_on_startup() -> None:
         logger.info("启动预加载 markets 完成：%s 个账户", warmed)
 
 
+def start_preload_trade_markets_in_background() -> None:
+    """后台预加载 markets，避免启动阶段因网络抖动阻塞主进程。"""
+    threading.Thread(
+        target=preload_trade_markets_on_startup,
+        name="preload-trade-markets",
+        daemon=True,
+    ).start()
+
+
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
     """
-    按账户创建/复用 ccxt 实例（币安）。
+    按账户创建/复用 ccxt 实例（binance / hyperliquid）。
 
     purpose:
       - trade: 下单关键路径（/webhook、/api/order）
@@ -1089,24 +1272,38 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
     if not api_key or not secret:
         raise ValueError("账户未配置 API Key / Secret")
     ex_name = (account.get("exchange") or "binance").lower()
-    if ex_name != "binance":
-        raise ValueError("暂仅支持 binance")
-    opts: dict[str, Any] = {
-        "defaultType": BINANCE_DEFAULT_TYPE,
-        "fetchCurrencies": False,
-        "fetchBalance": {"defaultType": BINANCE_DEFAULT_TYPE},
-    }
-    ex = ccxt.binance(
-        {
-            "apiKey": api_key,
-            "secret": secret,
-            "options": opts,
-            "enableRateLimit": True,
+    if ex_name == "binance":
+        opts: dict[str, Any] = {
+            "defaultType": BINANCE_DEFAULT_TYPE,
+            "fetchCurrencies": False,
+            "fetchBalance": {"defaultType": BINANCE_DEFAULT_TYPE},
         }
-    )
-    ex.options["fetchCurrencies"] = False
-    if USE_TESTNET:
-        ex.set_sandbox_mode(True)
+        ex = ccxt.binance(
+            {
+                "apiKey": api_key,
+                "secret": secret,
+                "options": opts,
+                "enableRateLimit": True,
+            }
+        )
+        ex.options["fetchCurrencies"] = False
+        if USE_TESTNET:
+            ex.set_sandbox_mode(True)
+    elif ex_name == "hyperliquid":
+        default_type = "swap" if BINANCE_DEFAULT_TYPE == "future" else "spot"
+        # 复用现有字段：
+        # - api_key: walletAddress
+        # - secret : privateKey
+        ex = ccxt.hyperliquid(
+            {
+                "walletAddress": api_key,
+                "privateKey": secret,
+                "options": {"defaultType": default_type},
+                "enableRateLimit": True,
+            }
+        )
+    else:
+        raise ValueError("暂仅支持 binance / hyperliquid")
     with _exchange_cache_lock:
         _exchange_cache[cache_key] = ex
     return ex
@@ -1329,12 +1526,28 @@ def normalize_symbol(raw: str) -> str:
     return s
 
 
+def _exchange_id(exchange) -> str:
+    return str(getattr(exchange, "id", "") or "").lower()
+
+
+def _is_binance_exchange(exchange) -> bool:
+    return _exchange_id(exchange) == "binance"
+
+
+def _replace_quote(symbol: str, new_quote: str) -> str:
+    if "/" not in symbol:
+        return symbol
+    base, _ = symbol.split("/", 1)
+    return f"{base}/{new_quote}"
+
+
 def resolve_symbol(exchange, symbol: str) -> str:
     """
     统一 symbol。注意：BTCUSDT 会先被归一成 BTC/USDT，而 markets 里 BTC/USDT 是现货；
     若 BINANCE_DEFAULT_TYPE=future，必须优先落到 U 本位永续（如 BTC/USDT:USDT），
     否则下单/拉成交会走错现货市场，合约有成交时现货列表仍为空。
     """
+    ex_id = _exchange_id(exchange)
     exchange.load_markets()
     if symbol in exchange.markets:
         m = exchange.markets[symbol]
@@ -1343,14 +1556,31 @@ def resolve_symbol(exchange, symbol: str) -> str:
             and m.get("spot")
             and not m.get("contract")
         ):
-            alt = f"{symbol}:USDT"
-            if alt in exchange.markets:
-                return alt
+            candidates = [f"{symbol}:USDT", f"{symbol}:USDC"]
+            if ex_id == "hyperliquid":
+                usdc_sym = _replace_quote(symbol, "USDC")
+                candidates = [
+                    f"{usdc_sym}:USDC",
+                    f"{symbol}:USDC",
+                    f"{symbol}:USDT",
+                ]
+            for alt in candidates:
+                if alt in exchange.markets:
+                    return alt
         return symbol
     if BINANCE_DEFAULT_TYPE == "future":
-        alt = f"{symbol}:USDT"
-        if alt in exchange.markets:
-            return alt
+        candidates = [f"{symbol}:USDT", f"{symbol}:USDC"]
+        if ex_id == "hyperliquid":
+            usdc_sym = _replace_quote(symbol, "USDC")
+            candidates = [f"{usdc_sym}:USDC", f"{symbol}:USDC", f"{symbol}:USDT", usdc_sym]
+        for alt in candidates:
+            if alt in exchange.markets:
+                return alt
+    if ex_id == "hyperliquid":
+        usdc_sym = _replace_quote(symbol, "USDC")
+        for alt in (usdc_sym, symbol):
+            if alt in exchange.markets:
+                return alt
     raise ValueError(f"未知交易对: {symbol}")
 
 
@@ -1360,6 +1590,17 @@ def quote_to_base_amount(exchange, symbol: str, quote_usdt: float) -> float:
     if price <= 0:
         raise ValueError("无法从行情获取有效价格")
     return quote_usdt / price
+
+
+def _market_price_for_order(exchange, symbol: str) -> float | None:
+    """部分交易所（如 hyperliquid）市价单要求参考价用于滑点。"""
+    if _exchange_id(exchange) != "hyperliquid":
+        return None
+    t = exchange.fetch_ticker(symbol)
+    price = float(t.get("last") or t.get("close") or 0)
+    if price <= 0:
+        raise ValueError("hyperliquid 无法获取有效市价")
+    return price
 
 
 def parse_body() -> dict[str, Any]:
@@ -1411,6 +1652,7 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
         params["reduceOnly"] = True
 
     symbol = resolve_symbol(exchange, symbol)
+    market_price = _market_price_for_order(exchange, symbol)
 
     full_flat = _tv_payload_is_strategy_full_flat(payload, reduce_only)
     # 合约仅减仓：
@@ -1448,13 +1690,16 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
 
     if cost is not None:
         # 现货/合约均按最新价把 USDT 名义换算成基础币数量（与币安 API 一致）
-        base_amt = quote_to_base_amount(exchange, symbol, cost)
+        if market_price is not None and market_price > 0:
+            base_amt = cost / market_price
+        else:
+            base_amt = quote_to_base_amount(exchange, symbol, cost)
         order = exchange.create_order(
-            symbol, "market", action, base_amt, None, params
+            symbol, "market", action, base_amt, market_price, params
         )
     else:
         order = exchange.create_order(
-            symbol, "market", action, amt, None, params
+            symbol, "market", action, amt, market_price, params
         )
 
     return order
@@ -1623,6 +1868,16 @@ def api_accounts_put():
                 "webhook_enabled": bool(row.get("webhook_enabled", True)),
             }
         )
+        if merged[-1]["exchange"] not in ("binance", "hyperliquid"):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": f"账户「{row.get('remark') or rid}」交易所仅支持 binance 或 hyperliquid",
+                    }
+                ),
+                400,
+            )
     try:
         _save_accounts_file(merged)
     except OSError as ex:
@@ -1647,29 +1902,38 @@ def _to_float(x: Any) -> float | None:
 
 def normalize_usdt_balance(bal: dict[str, Any]) -> dict[str, Any]:
     """
-    合约余额。fapi/v2 等接口的原始响应有时是「数组」，ccxt 放在 bal['info'] 里为 list，
+    合约稳定币余额。优先 USDT，回退 USDC。
+    fapi/v2 等接口的原始响应有时是「数组」，ccxt 放在 bal['info'] 里为 list，
     之前只处理 dict 会落到 default_zero。依次：统一结构 → 聚合 → info 为 list → info 为 dict。
     """
-    u = bal.get("USDT") or {}
-    f, used, total = _to_float(u.get("free")), _to_float(u.get("used")), _to_float(u.get("total"))
-    if f is not None or used is not None or total is not None:
-        return {"free": f, "used": used, "total": total, "source": "unified"}
+    stable = "USDT" if bal.get("USDT") else ("USDC" if bal.get("USDC") else None)
+    if stable:
+        u = bal.get(stable) or {}
+        f, used, total = _to_float(u.get("free")), _to_float(u.get("used")), _to_float(
+            u.get("total")
+        )
+        if f is not None or used is not None or total is not None:
+            return {"free": f, "used": used, "total": total, "source": "unified", "currency": stable}
 
     agg_f = bal.get("free") if isinstance(bal.get("free"), dict) else {}
     agg_u = bal.get("used") if isinstance(bal.get("used"), dict) else {}
     agg_t = bal.get("total") if isinstance(bal.get("total"), dict) else {}
-    if isinstance(agg_f, dict) and "USDT" in agg_f:
-        return {
-            "free": _to_float(agg_f.get("USDT")),
-            "used": _to_float(agg_u.get("USDT")),
-            "total": _to_float(agg_t.get("USDT")),
-            "source": "aggregated",
-        }
+    if isinstance(agg_f, dict):
+        stable = "USDT" if "USDT" in agg_f else ("USDC" if "USDC" in agg_f else None)
+        if stable:
+            return {
+                "free": _to_float(agg_f.get(stable)),
+                "used": _to_float(agg_u.get(stable)),
+                "total": _to_float(agg_t.get(stable)),
+                "source": "aggregated",
+                "currency": stable,
+            }
 
     info = bal.get("info")
     if isinstance(info, list):
         for row in info:
-            if str(row.get("asset", "")).upper() != "USDT":
+            asset = str(row.get("asset", "")).upper()
+            if asset not in ("USDT", "USDC"):
                 continue
             return {
                 "free": _to_float(row.get("availableBalance")),
@@ -1680,13 +1944,15 @@ def normalize_usdt_balance(bal: dict[str, Any]) -> dict[str, Any]:
                     or row.get("balance")
                 ),
                 "source": "info_list",
+                "currency": asset,
             }
 
     if isinstance(info, dict):
         assets = info.get("assets")
         if isinstance(assets, list):
             for row in assets:
-                if str(row.get("asset", "")).upper() == "USDT":
+                asset = str(row.get("asset", "")).upper()
+                if asset in ("USDT", "USDC"):
                     return {
                         "free": _to_float(row.get("availableBalance")),
                         "used": _to_float(row.get("initialMargin")),
@@ -1694,6 +1960,7 @@ def normalize_usdt_balance(bal: dict[str, Any]) -> dict[str, Any]:
                             row.get("marginBalance") or row.get("walletBalance")
                         ),
                         "source": "assets",
+                        "currency": asset,
                     }
         summary_keys = (
             "availableBalance",
@@ -1716,21 +1983,23 @@ def normalize_usdt_balance(bal: dict[str, Any]) -> dict[str, Any]:
         "used": 0.0,
         "total": 0.0,
         "source": "default_zero",
+        "currency": "USDT",
         "note": "未能解析合约原始 info；若你实际在现货钱包，请看返回里的 usdt_spot",
     }
 
 
 def normalize_spot_usdt(bal: dict[str, Any]) -> dict[str, Any]:
-    """现货 USDT。"""
-    u = bal.get("USDT") or {}
+    """现货稳定币余额。优先 USDT，回退 USDC。"""
+    stable = "USDT" if bal.get("USDT") else ("USDC" if bal.get("USDC") else "USDT")
+    u = bal.get(stable) or {}
     free, used, tot = (
         _to_float(u.get("free")),
         _to_float(u.get("used")),
         _to_float(u.get("total")),
     )
     if free is not None or used is not None or tot is not None:
-        return {"free": free, "used": used, "total": tot, "source": "spot"}
-    return {"free": 0.0, "used": 0.0, "total": 0.0, "source": "spot_empty"}
+        return {"free": free, "used": used, "total": tot, "source": "spot", "currency": stable}
+    return {"free": 0.0, "used": 0.0, "total": 0.0, "source": "spot_empty", "currency": stable}
 
 
 @app.post("/api/balance")
@@ -1769,31 +2038,46 @@ def api_balance():
                 continue
             try:
                 ex = get_exchange_for_account(a, purpose="read")
+                ex_id = _exchange_id(ex)
                 usdt_future: dict[str, Any] = {}
                 usdt_spot: dict[str, Any] = {}
                 try:
+                    fut_type = "swap" if ex_id == "hyperliquid" else "future"
+                    fut_params: dict[str, Any] = {"type": fut_type}
+                    if ex_id == "hyperliquid":
+                        fut_params["user"] = str(a.get("api_key") or "")
                     usdt_future = normalize_usdt_balance(
-                        ex.fetch_balance({"type": "future"})
+                        ex.fetch_balance(fut_params)
                     )
                 except Exception as e:
                     logger.warning("查询合约余额失败: %s", e)
                     usdt_future = {"error": str(e), "source": "future_error"}
                 try:
+                    spot_params: dict[str, Any] = {"type": "spot"}
+                    if ex_id == "hyperliquid":
+                        spot_params["user"] = str(a.get("api_key") or "")
                     usdt_spot = normalize_spot_usdt(
-                        ex.fetch_balance({"type": "spot"})
+                        ex.fetch_balance(spot_params)
                     )
                 except Exception as e:
                     logger.warning("查询现货余额失败: %s", e)
                     usdt_spot = {"error": str(e), "source": "spot_error"}
-                primary = (
-                    usdt_future
-                    if BINANCE_DEFAULT_TYPE == "future"
-                    else usdt_spot
-                )
+                if ex_id == "hyperliquid":
+                    fut_total = _to_float(usdt_future.get("total")) or 0.0
+                    spot_total = _to_float(usdt_spot.get("total")) or 0.0
+                    if fut_total > 0 and fut_total >= spot_total:
+                        primary = usdt_future
+                    elif spot_total > 0:
+                        primary = usdt_spot
+                    else:
+                        primary = usdt_future
+                else:
+                    primary = usdt_future if BINANCE_DEFAULT_TYPE == "future" else usdt_spot
                 rows.append(
                     {
                         "account_id": a["id"],
                         "remark": a.get("remark"),
+                        "exchange": a.get("exchange") or "binance",
                         "fixed_quote_usdt": a.get("fixed_quote_usdt"),
                         "template_capital_usdt": a.get("template_capital_usdt"),
                         "usdt": primary,
@@ -1853,16 +2137,21 @@ def api_order():
     try:
         t_total_start = time.time()
         ex = get_exchange_for_account(a, purpose="trade")
+        account_trade_lock = _get_account_trade_lock(str(a["id"]))
         sizing_mode = None
         if use_base_amount:
             t_exec_start = time.time()
-            order = _merge_order_with_fetch(ex, place_order(ex, payload))
+            with account_trade_lock:
+                created = place_order(ex, payload)
+            order = _merge_order_with_fetch(ex, created)
             ro = bool(payload.get("_resolved_reduce_only", False))
             sizing_mode = "manual_amount"
         else:
             op = build_order_payload_for_account(payload, a)
             t_exec_start = time.time()
-            order = _merge_order_with_fetch(ex, place_order(ex, op))
+            with account_trade_lock:
+                created = place_order(ex, op)
+            order = _merge_order_with_fetch(ex, created)
             ro = bool(op.get("_resolved_reduce_only", False))
             sizing_mode = op.get("_sizing_mode")
             payload["_resolved_reduce_only"] = op.get("_resolved_reduce_only")
@@ -1880,6 +2169,7 @@ def api_order():
         cancel_res: dict[str, Any] = {}
         if (
             BINANCE_DEFAULT_TYPE == "future"
+            and _is_binance_exchange(ex)
             and ro
             and should_cancel_stop_loss_on_reduce(
                 ex, str(order.get("symbol") or ""), payload, ro
@@ -1974,14 +2264,25 @@ def api_signal_log():
     bad = dashboard_auth_response_if_invalid(allow_viewer=True)
     if bad:
         return bad
+    include_archive = str(request.args.get("include_archive") or "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     with _LOG_LOCK:
         items = list(_signal_log)
         total = len(_signal_log)
+    if include_archive:
+        archived = _load_persisted_jsonl_list(_SIGNAL_ARCHIVE_JSONL_PATH)
+        items = items + archived
+        total += len(archived)
     return jsonify(
         {
             "ok": True,
             "total_stored": total,
-            "hint": "保存在 data/signal_log.json；不自动删除，仅控制台「清空」或 DELETE /api/signal-log。",
+            "include_archive": include_archive,
+            "hint": "热日志保存在 data/signal_log.jsonl；归档为 data/signal_log.archive.jsonl。",
             "items": items,
         }
     )
@@ -1997,6 +2298,8 @@ def api_signal_log_delete():
     with _LOG_LOCK:
         _signal_log = []
         _save_signal_log()
+        if _SIGNAL_ARCHIVE_JSONL_PATH.is_file():
+            _SIGNAL_ARCHIVE_JSONL_PATH.unlink(missing_ok=True)
     return jsonify({"ok": True, "cleared": True})
 
 
@@ -2009,6 +2312,12 @@ def api_account_log():
     aid = (request.args.get("account_id") or "").strip()
     market_filter = (request.args.get("market") or "").strip().lower()
     symbol_q = (request.args.get("symbol") or "").strip()
+    include_archive = str(request.args.get("include_archive") or "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
     try:
         limit = min(
             max(int(request.args.get("limit") or 2000), 1), ACCOUNT_LOG_QUERY_MAX
@@ -2018,6 +2327,12 @@ def api_account_log():
     with _LOG_LOCK:
         snapshot = list(_account_log)
         total_stored = len(_account_log)
+    archived_count = 0
+    if include_archive:
+        archived = _load_persisted_jsonl_list(_EXECUTION_ARCHIVE_JSONL_PATH)
+        archived_count = len(archived)
+        snapshot = snapshot + archived
+        total_stored += archived_count
     out: list[dict[str, Any]] = []
     for e in snapshot:
         if aid and str(e.get("account_id")) != aid:
@@ -2029,7 +2344,7 @@ def api_account_log():
         out.append(e)
         if len(out) >= limit:
             break
-    hint = "保存在 data/execution_log.json；不自动删除条数，仅手动删除或清空。时间 UTC。"
+    hint = "热日志保存在 data/execution_log.jsonl；超出上限会归档到 data/execution_log.archive.jsonl。时间 UTC。"
     if any(
         x.get("server_latency_ms") is not None and x.get("receive_signal_ms") is None
         for x in out
@@ -2041,6 +2356,8 @@ def api_account_log():
             "items": out,
             "failures_24h": _failures_24h_count_in_list(snapshot),
             "total_stored": total_stored,
+            "archived_count": archived_count,
+            "include_archive": include_archive,
             "hint": hint,
             "binance_default_type": BINANCE_DEFAULT_TYPE,
         }
@@ -2063,10 +2380,17 @@ def api_account_log_delete():
             _account_log = [
                 e for e in _account_log if str(e.get("account_id")) != aid
             ]
-            removed = before - len(_account_log)
+            removed_hot = before - len(_account_log)
+            removed_archive = _delete_rows_in_jsonl(
+                _EXECUTION_ARCHIVE_JSONL_PATH,
+                lambda row: str((row or {}).get("account_id")) == aid,
+            )
+            removed = removed_hot + removed_archive
         else:
             removed = len(_account_log)
             _account_log = []
+            if _EXECUTION_ARCHIVE_JSONL_PATH.is_file():
+                _EXECUTION_ARCHIVE_JSONL_PATH.unlink(missing_ok=True)
         _save_execution_log()
         remaining = len(_account_log)
     return jsonify(
@@ -2107,6 +2431,7 @@ def _finalize_webhook_results_after_delay(
             cancel_res: dict[str, Any] = {}
             if (
                 BINANCE_DEFAULT_TYPE == "future"
+                and _is_binance_exchange(ex)
                 and ro
                 and should_cancel_stop_loss_on_reduce(
                     ex, str(order.get("symbol") or ""), payload_for_post, ro
@@ -2168,76 +2493,99 @@ def webhook():
 
     t_recv = time.time()
     payload = parse_body()
-    logger.info("收到 TV 载荷: %s", json.dumps(payload, ensure_ascii=False)[:500])
+    if WEBHOOK_LOG_PAYLOAD:
+        logger.info("收到 TV 载荷: %s", json.dumps(payload, ensure_ascii=False)[:500])
+    else:
+        logger.info("收到 TV 载荷: symbol=%s action=%s", payload.get("symbol") or payload.get("ticker"), payload.get("action") or payload.get("side"))
     t_trade_start = time.time()
     receive_signal_ms = round((t_trade_start - t_recv) * 1000, 2)
 
-    results: list[dict[str, Any]] = []
-    post_tasks: list[dict[str, Any] | None] = []
-    for a in targets:
-        try:
-            ex = get_exchange_for_account(a, purpose="trade")
-            op = build_order_payload_for_account(payload, a)
+    results: list[dict[str, Any] | None] = [None] * len(targets)
+    post_tasks: list[dict[str, Any] | None] = [None] * len(targets)
+    payload_for_log = dict(payload)
+
+    def _submit_one(idx: int, account: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any] | None, bool]:
+        ex = get_exchange_for_account(account, purpose="trade")
+        op = build_order_payload_for_account(dict(payload), account)
+        with _get_account_trade_lock(str(account.get("id") or "")):
             order = place_order(ex, op)
-            if "_resolved_reduce_only" in op:
-                payload["reduce_only"] = op["_resolved_reduce_only"]
-                payload["_resolved_reduce_only"] = op["_resolved_reduce_only"]
-            ro = bool(op.get("_resolved_reduce_only", False))
-            results.append(
-                {
-                    "account_id": a["id"],
-                    "remark": a.get("remark"),
-                    "ok": True,
-                    "order": order,
-                    "fixed_quote_usdt": a.get("fixed_quote_usdt"),
-                    "used_quote_usdt": op.get("quote_amount"),
-                    "sizing_mode": op.get("_sizing_mode"),
-                    "template_scale": op.get("_template_scale"),
-                    "stop_loss_order": None,
-                    "stop_loss_error": None,
-                    "post_process": f"delayed_{int(WEBHOOK_POST_DELAY_SEC)}s",
-                }
-            )
-            post_tasks.append(
-                {
-                    "exchange": ex,
-                    "order": order,
-                    "reduce_only": ro,
-                    "payload": dict(payload),
-                }
-            )
-        except Exception as e:
-            logger.exception("账户 %s 下单失败", a.get("id"))
-            results.append(
-                {
-                    "account_id": a["id"],
-                    "remark": a.get("remark"),
+        ro = bool(op.get("_resolved_reduce_only", False))
+        result_row = {
+            "account_id": account["id"],
+            "remark": account.get("remark"),
+            "ok": True,
+            "order": order,
+            "fixed_quote_usdt": account.get("fixed_quote_usdt"),
+            "used_quote_usdt": op.get("quote_amount"),
+            "sizing_mode": op.get("_sizing_mode"),
+            "template_scale": op.get("_template_scale"),
+            "stop_loss_order": None,
+            "stop_loss_error": None,
+            "post_process": f"delayed_{int(WEBHOOK_POST_DELAY_SEC)}s",
+        }
+        task_row = {
+            "exchange": ex,
+            "order": order,
+            "reduce_only": ro,
+            "payload": dict(op),
+        }
+        return idx, result_row, task_row, ("_resolved_reduce_only" in op)
+
+    workers = max(1, min(len(targets), max(1, int(WEBHOOK_TRADE_MAX_WORKERS))))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="webhook-trade") as pool:
+        fut_map = {
+            pool.submit(_submit_one, idx, account): (idx, account)
+            for idx, account in enumerate(targets)
+        }
+        for fut in as_completed(fut_map):
+            idx, account = fut_map[fut]
+            try:
+                i, result_row, task_row, has_resolved = fut.result()
+                results[i] = result_row
+                post_tasks[i] = task_row
+                if has_resolved and "_resolved_reduce_only" not in payload_for_log:
+                    ro = bool(task_row.get("reduce_only")) if task_row else False
+                    payload_for_log["_resolved_reduce_only"] = ro
+                    payload_for_log["reduce_only"] = ro
+            except Exception as e:
+                logger.exception("账户 %s 下单失败", account.get("id"))
+                results[idx] = {
+                    "account_id": account["id"],
+                    "remark": account.get("remark"),
                     "ok": False,
                     "error": str(e),
                 }
-            )
-            post_tasks.append(None)
+                post_tasks[idx] = None
+
+    final_results: list[dict[str, Any]] = [
+        r
+        if isinstance(r, dict)
+        else {
+            "account_id": targets[i]["id"],
+            "remark": targets[i].get("remark"),
+            "ok": False,
+            "error": "下单结果为空",
+        }
+        for i, r in enumerate(results)
+    ]
     t_trade_done = time.time()
     execute_trade_ms = round((t_trade_done - t_trade_start) * 1000, 2)
     total_trade_ms = round((t_trade_done - t_recv) * 1000, 2)
-    threading.Thread(
-        target=_finalize_webhook_results_after_delay,
-        kwargs={
-            "delay_sec": WEBHOOK_POST_DELAY_SEC,
-            "t_recv": t_recv,
-            "payload": dict(payload),
-            "base_results": results,
-            "post_tasks": post_tasks,
-            "receive_signal_ms": receive_signal_ms,
-            "execute_trade_ms": execute_trade_ms,
-            "total_trade_ms": total_trade_ms,
-            "completed_at": t_trade_done,
-        },
-        daemon=True,
-    ).start()
-    ok_all = all(r.get("ok") for r in results)
+    _get_webhook_finalize_executor().submit(
+        _finalize_webhook_results_after_delay,
+        delay_sec=WEBHOOK_POST_DELAY_SEC,
+        t_recv=t_recv,
+        payload=payload_for_log,
+        base_results=final_results,
+        post_tasks=post_tasks,
+        receive_signal_ms=receive_signal_ms,
+        execute_trade_ms=execute_trade_ms,
+        total_trade_ms=total_trade_ms,
+        completed_at=t_trade_done,
+    )
+    ok_all = all(r.get("ok") for r in final_results)
     # 始终 200，避免 TradingView 因 4xx 反复重试；成功与否看 ok 与 results。
-    return jsonify({"ok": ok_all, "results": results})
+    return jsonify({"ok": ok_all, "results": final_results})
 
 
 def main():
@@ -2256,7 +2604,8 @@ def main():
     elif not WEBHOOK_SECRET:
         print("提示: 未设置 TV_WEBHOOK_SECRET，TradingView /webhook 仍不可用。", file=sys.stderr)
     if PRELOAD_MARKETS_ON_STARTUP:
-        preload_trade_markets_on_startup()
+        start_preload_trade_markets_in_background()
+    _get_webhook_finalize_executor()
     port = int(os.getenv("PORT", "5000"))
     # threaded=True：控制台查余额/拉日志等慢请求不阻塞另一条线程处理 /webhook 下单
     threaded = os.getenv("FLASK_THREADED", "true").lower() in ("1", "true", "yes", "on")
