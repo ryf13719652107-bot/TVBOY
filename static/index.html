@@ -5,50 +5,91 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TV量化机器人</title>
   <style>
+    /* 设计令牌：仅影响呈现，不改变任何业务脚本与接口 */
     :root {
-      --bg: #eef3ff;
+      --bg: #f1f5f9;
+      --bg-accent: #e8f0fc;
       --card: #ffffff;
-      --border: #d6e0ee;
-      --text: #1a2332;
-      --muted: #5c6b7a;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --text-secondary: #475569;
+      --muted: #64748b;
       --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --accent-soft: #eff6ff;
       --ok: #059669;
       --err: #dc2626;
       --input-bg: #ffffff;
-      --elevated: #f4f8ff;
-      --table-header: #edf3ff;
-      --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+      --elevated: #f8fafc;
+      --table-header: #f8fafc;
+      --table-row-alt: #fafbfc;
+      --table-hover: #f0f9ff;
+      --font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
       --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+      --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.06);
+      --shadow-card: 0 8px 28px rgba(15, 23, 42, 0.07);
+      --ring-focus: 0 0 0 3px rgba(37, 99, 235, 0.22);
+      --space-1: 0.25rem;
+      --space-2: 0.5rem;
+      --space-3: 0.75rem;
+      --space-4: 1rem;
+      --space-5: 1.25rem;
+      --space-6: 1.5rem;
+      --text-xs: 0.7rem;
+      --text-sm: 0.8125rem;
+      --text-base: 0.9rem;
+      --text-lg: 1.05rem;
+      --text-title: 1.5rem;
       color-scheme: light;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
       font-family: var(--font);
-      background: radial-gradient(circle at top right, #dbeafe 0%, var(--bg) 35%, #f8fafc 100%);
+      font-size: var(--text-base);
+      background: linear-gradient(165deg, var(--bg-accent) 0%, var(--bg) 42%, #f8fafc 100%);
       color: var(--text);
-      line-height: 1.5;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    .wrap { max-width: 880px; margin: 0 auto; padding: var(--space-6) var(--space-4) 3rem; }
     @media (min-width: 1024px) {
       .wrap {
         max-width: min(1240px, calc(100vw - 2.5rem));
-        padding: 1.5rem 1.25rem 3rem;
+        padding: var(--space-6) var(--space-5) 3rem;
       }
     }
-    h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 0.2rem; letter-spacing: -0.02em; color: #0f172a; }
-    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
-    .grid { display: grid; gap: 1rem; }
+    h1 {
+      font-size: var(--text-title);
+      font-weight: 700;
+      margin: 0 0 var(--space-1);
+      letter-spacing: -0.025em;
+      color: var(--text);
+    }
+    .sub { color: var(--muted); font-size: var(--text-sm); margin-bottom: var(--space-5); line-height: 1.5; }
+    .grid { display: grid; gap: var(--space-4); }
     @media (min-width: 640px) {
       .grid-2 { grid-template-columns: 1fr 1fr; }
     }
     .card {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 1rem 1.1rem;
-      box-shadow: 0 8px 24px rgba(37, 99, 235, 0.07);
+      border-radius: var(--radius-lg);
+      padding: var(--space-4) var(--space-5);
+      box-shadow: var(--shadow-card);
       position: relative;
       overflow: visible;
     }
@@ -58,32 +99,34 @@
       left: 0;
       right: 0;
       top: 0;
-      height: 3px;
-      background: linear-gradient(90deg, #3b82f6, #38bdf8 55%, #22d3ee);
-      opacity: 0.8;
+      height: 2px;
+      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+      background: linear-gradient(90deg, var(--accent), #38bdf8 70%, #7dd3fc);
+      opacity: 1;
     }
     code {
       background: var(--elevated);
-      padding: 0.12rem 0.35rem;
-      border-radius: 4px;
+      padding: 0.1rem 0.32rem;
+      border-radius: var(--radius-sm);
       font-size: 0.88em;
       border: 1px solid var(--border);
+      color: var(--text-secondary);
     }
     .card h2 {
-      font-size: 0.8rem;
+      font-size: var(--text-xs);
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.08em;
       color: var(--muted);
-      margin: 0 0 0.75rem;
-      font-weight: 600;
+      margin: 0 0 var(--space-3);
+      font-weight: 700;
     }
     .stat {
-      font-size: 0.92rem;
-      line-height: 1.7;
-      background: #f8fbff;
-      border: 1px solid #d9e5f6;
-      border-radius: 10px;
-      padding: 0.6rem 0.7rem;
+      font-size: var(--text-sm);
+      line-height: 1.65;
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-3);
     }
     .stat span {
       color: var(--muted);
@@ -93,58 +136,79 @@
     }
     .pill {
       display: inline-block;
-      padding: 0.15rem 0.5rem;
-      border-radius: 6px;
-      font-size: 0.75rem;
+      padding: 0.12rem 0.45rem;
+      border-radius: var(--radius-sm);
+      font-size: var(--text-xs);
       font-weight: 600;
     }
     .pill.on { background: rgba(5, 150, 105, 0.12); color: var(--ok); }
     .pill.off { background: rgba(220, 38, 38, 0.1); color: var(--err); }
-    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
+    label { display: block; font-size: var(--text-sm); color: var(--text-secondary); margin-bottom: var(--space-2); font-weight: 500; }
     input, select, textarea {
       width: 100%;
-      padding: 0.55rem 0.65rem;
-      border-radius: 8px;
+      padding: 0.52rem 0.68rem;
+      border-radius: var(--radius-md);
       border: 1px solid var(--border);
       background: var(--input-bg);
       color: var(--text);
       font-family: inherit;
-      font-size: 0.9rem;
+      font-size: var(--text-base);
+      box-shadow: var(--shadow-sm);
     }
-    textarea { font-family: var(--mono); font-size: 0.8rem; min-height: 88px; resize: vertical; }
+    textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 88px; resize: vertical; }
+    input[type="checkbox"],
+    input[type="radio"] {
+      width: auto;
+      min-width: 1rem;
+      margin: 0 0.35rem 0 0;
+      box-shadow: none;
+      vertical-align: middle;
+      accent-color: var(--accent);
+    }
     input:focus, select:focus, textarea:focus {
       outline: none;
       border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.2);
+      box-shadow: var(--ring-focus);
     }
-    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+    .row { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end; }
     .row > * { flex: 1; min-width: 120px; }
     button {
       cursor: pointer;
-      padding: 0.55rem 1rem;
-      border-radius: 8px;
-      border: none;
+      padding: 0.52rem 1.05rem;
+      border-radius: var(--radius-md);
       font-weight: 600;
-      font-size: 0.9rem;
+      font-size: var(--text-base);
       font-family: inherit;
-      background: linear-gradient(180deg, #0ea5e9, #0284c7);
+    }
+    /* 主操作：纯色 + 明确 hover，无 transition，避免任何交互上的「肉感延迟」 */
+    button:not(.secondary):not(.tab-btn):not(.btn-link) {
+      border: none;
+      background: var(--accent);
       color: #fff;
+      box-shadow: var(--shadow-sm);
     }
-    button:hover { filter: brightness(1.06); }
+    button:not(.secondary):not(.tab-btn):not(.btn-link):hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
     button.secondary {
-      background: #e2e8f0;
+      background: var(--elevated);
       color: var(--text);
-      border: 1px solid #cbd5e1;
+      border: 1px solid var(--border-strong);
+      box-shadow: none;
     }
-    button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+    button.secondary:hover:not(:disabled) {
+      background: #eef2f7;
+      border-color: var(--muted);
+    }
+    button:disabled { opacity: 0.48; cursor: not-allowed; }
     .out {
-      margin-top: 0.75rem;
-      padding: 0.75rem;
-      border-radius: 8px;
+      margin-top: var(--space-3);
+      padding: var(--space-3);
+      border-radius: var(--radius-md);
       background: var(--elevated);
       border: 1px solid var(--border);
       font-family: var(--mono);
-      font-size: 0.75rem;
+      font-size: var(--text-xs);
       white-space: pre-wrap;
       word-break: break-all;
       max-height: 280px;
@@ -152,20 +216,71 @@
       color: var(--text);
     }
     .out.err { border-color: rgba(220, 38, 38, 0.45); color: #b91c1c; background: #fef2f2; }
-    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+    .hint { font-size: var(--text-sm); color: var(--muted); margin-top: var(--space-2); line-height: 1.5; }
+    .hint.compact { margin-top: var(--space-2); font-size: var(--text-sm); line-height: 1.45; }
+    .label-with-tip {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.35rem;
+    }
+    .label-with-tip > .label-text {
+      font-size: 0.8rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .settings-section {
+      margin-top: var(--space-4);
+      padding-top: var(--space-4);
+      border-top: 1px solid var(--border);
+    }
+    .settings-section:first-of-type {
+      margin-top: var(--space-1);
+      padding-top: 0;
+      border-top: none;
+    }
+    .settings-section-title {
+      font-size: var(--text-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin: 0 0 var(--space-3);
+    }
+    .settings-actions {
+      margin-top: 1.1rem;
+      display: flex;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .settings-actions button { min-width: 9rem; }
+    .stop-loss-inline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      align-items: flex-end;
+    }
+    .stop-loss-inline > .sl-check {
+      flex: 0 0 auto;
+      min-width: unset;
+      margin-top: 0.35rem;
+    }
+    .stop-loss-inline > .sl-pct { flex: 1; min-width: 9rem; max-width: 15rem; }
+    #templateBaseWrap.template-base-dim input { background: var(--elevated); color: var(--muted); }
     .copy-row { display: flex; gap: 0.5rem; align-items: stretch; }
     .copy-row textarea { flex: 1; min-height: 72px; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .balance-plain {
-      margin-top: 0.75rem;
-      padding: 1rem 1.1rem;
-      border-radius: 8px;
-      background: #f0f9ff;
-      border: 1px solid #bae6fd;
-      border-left-width: 4px;
-      border-left-color: var(--accent);
-      font-size: 0.95rem;
+      margin-top: var(--space-3);
+      padding: var(--space-4) var(--space-4);
+      border-radius: var(--radius-md);
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      font-size: var(--text-base);
       line-height: 1.65;
       min-height: 3rem;
     }
@@ -177,25 +292,37 @@
       font-size: 1.1rem;
       font-weight: 600;
     }
-    .balance-raw-title { font-size: 0.75rem; color: var(--muted); margin-top: 0.75rem; margin-bottom: 0.25rem; }
+    .balance-raw-title { font-size: var(--text-xs); color: var(--muted); margin-top: var(--space-3); margin-bottom: var(--space-1); font-weight: 600; letter-spacing: 0.02em; }
+    .tv-snippet-head {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-top: 1rem;
+    }
+    .tv-snippet-head .balance-raw-title { margin: 0; }
     .btn-link {
-      background: none;
-      border: none;
+      background: none !important;
+      border: none !important;
+      box-shadow: none !important;
       color: var(--accent);
       cursor: pointer;
-      font-size: 0.85rem;
-      padding: 0.25rem 0;
+      font-size: var(--text-sm);
+      font-weight: 500;
+      padding: 0.2rem 0;
+      border-radius: var(--radius-sm);
       text-decoration: underline;
     }
-    .btn-link:hover { filter: brightness(1.1); }
+    .btn-link:hover { color: var(--accent-hover); }
     .table-wrap {
-      margin-top: 0.75rem;
+      margin-top: var(--space-3);
       overflow-x: auto;
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       border: 1px solid var(--border);
       max-height: 420px;
       overflow-y: auto;
-      background: #fdfefe;
+      background: var(--card);
+      box-shadow: var(--shadow-sm);
     }
     table.siglog {
       width: 100%;
@@ -206,7 +333,7 @@
     table.siglog th, table.siglog td {
       padding: 0.34rem 0.45rem;
       text-align: left;
-      border-bottom: 1px solid #c7d2fe;
+      border-bottom: 1px solid var(--border);
       vertical-align: top;
     }
     table.siglog th {
@@ -219,8 +346,8 @@
       box-shadow: 0 1px 0 var(--border);
     }
     table.siglog tr:last-child td { border-bottom: none; }
-    table.siglog tbody tr:nth-child(even) { background: #fafcff; }
-    table.siglog tbody tr:hover { background: #eff6ff; }
+    table.siglog tbody tr:nth-child(even) { background: var(--table-row-alt); }
+    table.siglog tbody tr:hover { background: var(--table-hover); }
     table.siglog .ok { color: var(--ok); }
     table.siglog .bad { color: var(--err); }
     #accountLogWrap.table-wrap {
@@ -263,27 +390,29 @@
     .tabs {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.4rem;
-      margin-bottom: 1rem;
+      gap: var(--space-2);
+      margin-bottom: var(--space-4);
       border-bottom: 1px solid var(--border);
-      padding-bottom: 0.5rem;
+      padding-bottom: var(--space-2);
     }
     .tab-btn {
-      padding: 0.45rem 0.9rem;
-      border-radius: 8px;
-      border: 1px solid #cdd8ea;
-      background: #f8fbff;
-      color: #4b5b72;
+      padding: 0.42rem 0.85rem;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--text-secondary);
       cursor: pointer;
-      font-size: 0.875rem;
+      font-size: var(--text-sm);
       font-family: inherit;
+      font-weight: 600;
+      box-shadow: var(--shadow-sm);
     }
-    .tab-btn:hover { color: var(--text); border-color: #7aa2f7; background: #eef4ff; }
+    .tab-btn:hover { color: var(--text); border-color: var(--border-strong); background: var(--elevated); }
     .tab-btn.active {
-      border-color: #3b82f6;
-      color: #1d4ed8;
-      background: #dbeafe;
-      box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.2);
+      border-color: var(--accent);
+      color: var(--accent-hover);
+      background: var(--accent-soft);
+      box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
     }
     .title-line {
       display: flex;
@@ -298,11 +427,11 @@
       align-items: center;
       justify-content: center;
       border-radius: 999px;
-      font-size: 0.7rem;
+      font-size: var(--text-xs);
       line-height: 1;
-      color: #1d4ed8;
-      background: #dbeafe;
-      border: 1px solid #93c5fd;
+      color: var(--accent-hover);
+      background: var(--accent-soft);
+      border: 1px solid rgba(37, 99, 235, 0.28);
       cursor: help;
       user-select: none;
     }
@@ -337,23 +466,24 @@
     .tab-panel { display: none; margin-bottom: 0.5rem; }
     .tab-panel.active { display: block; }
     .health-strip {
-      margin-top: 0.75rem;
-      padding: 0.6rem 0.85rem;
-      border-radius: 8px;
+      margin-top: var(--space-3);
+      padding: var(--space-2) var(--space-3);
+      border-radius: var(--radius-md);
       background: var(--elevated);
       border: 1px solid var(--border);
-      font-size: 0.85rem;
+      font-size: var(--text-sm);
       color: var(--muted);
     }
     .health-strip strong { color: var(--text); }
     /* 交易所成交表（贴近币安合约成交列表） */
     .table-exchange-wrap {
-      margin-top: 0.75rem;
+      margin-top: var(--space-3);
       overflow: auto;
-      border-radius: 8px;
+      border-radius: var(--radius-md);
       border: 1px solid var(--border);
       background: var(--card);
       max-height: 560px;
+      box-shadow: var(--shadow-sm);
     }
     table.table-exchange {
       width: 100%;
@@ -382,10 +512,10 @@
       border-bottom: none;
     }
     table.table-exchange tbody tr:nth-child(even) {
-      background: #fafcff;
+      background: var(--table-row-alt);
     }
     table.table-exchange tbody tr:hover {
-      background: #eff6ff;
+      background: var(--table-hover);
     }
     table.table-exchange td.mono {
       font-family: var(--mono);
@@ -463,44 +593,62 @@
       </div>
     </div>
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">开仓后止损（合约） <span class="help-tip" tabindex="0" data-tip="开启后，非 reduce_only 的开仓/加仓成交完成会自动挂止损。优先 STOP，失败回退 STOP_MARKET。仅 BINANCE_DEFAULT_TYPE=future 生效。">?</span></h2>
-      <div class="row" style="margin-top: 0.5rem; align-items: center;">
-        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;margin-top:1.25rem;">
-          <input type="checkbox" id="stopLossEnabled" /> 开启止损挂单
-        </label>
-        <div>
-          <label for="stopLossPct">止损幅度（相对开仓均价 %）</label>
-          <input type="number" id="stopLossPct" min="0.01" max="50" step="0.01" value="3.33" />
+      <h2 class="title-line">机器人设置 <span class="help-tip" tabindex="0" data-tip="Webhook 与止损共用下方「保存设置」。Webhook 模式与全局模板本金对所有交易所生效；「全局模板本金」只在「跟随模板下单」时参与缩放；选「跟随TV策略下单」时这个数字可先留着不删，方便以后切回去。止损挂单仅在使用币安 U 本位合约（.env 中 BINANCE_DEFAULT_TYPE=future）且账户为币安时由机器人挂条件单。">?</span></h2>
+
+      <div class="settings-section">
+        <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
+          TradingView Webhook 跟单
+          <span class="help-tip" id="webhookSectionTip" tabindex="0" data-tip="这里选「跟随模板下单」还是「跟随TV策略下单」，决定机器人怎么把 TV 发来的 JSON 换成真实下单量。点「下单模式」旁问号可看大白话说明。">?</span>
         </div>
-        <div>
-          <label>&nbsp;</label>
-          <button type="button" class="secondary" id="btnSaveBotSettings" disabled>保存止损设置</button>
+        <div class="field-stack">
+          <label for="webhookSizingMode" class="label-with-tip">
+            <span class="label-text">下单模式</span>
+            <span class="help-tip" id="webhookSizingModeTip" tabindex="0" data-tip="">?</span>
+          </label>
+          <select id="webhookSizingMode">
+            <option value="template_or_fixed">跟随模板下单</option>
+            <option value="follow_tv">跟随TV策略下单</option>
+          </select>
+        </div>
+        <div class="field-stack" id="templateBaseWrap" style="margin-top: 0.75rem;">
+          <label for="templateBaseCapitalUsdt" class="label-with-tip">
+            <span class="label-text">全局模板本金（USDT）</span>
+            <span class="help-tip" id="templateBaseTip" tabindex="0" data-tip="">?</span>
+          </label>
+          <input type="number" id="templateBaseCapitalUsdt" min="0" step="0.01" value="1000" />
         </div>
       </div>
-      <p class="hint" style="margin-top: 0.5rem;">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
+
+      <div class="settings-section">
+        <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
+          开仓后止损（仅币安 U 本位合约）
+          <span class="help-tip" tabindex="0" data-tip="仅币安 U 本位合约生效。OKX、Hyperliquid 不会走此自动止损路径。">?</span>
+        </div>
+        <div class="stop-loss-inline">
+          <label class="sl-check" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;">
+            <input type="checkbox" id="stopLossEnabled" /> 成交后自动挂止损单
+          </label>
+          <div class="sl-pct">
+            <label for="stopLossPct">止损幅度（相对开仓均价 %）</label>
+            <input type="number" id="stopLossPct" min="0.01" max="50" step="0.01" value="3.33" />
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button type="button" class="secondary" id="btnSaveBotSettings" disabled>保存设置</button>
+      </div>
     </div>
     <p id="healthLine" class="health-strip">近 24 小时失败次数：—（保存密钥并打开「运行日志」后更新）</p>
     </div>
 
     <div id="panel-accounts" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">交易账户 <span class="help-tip" tabindex="0" data-tip="支持 Binance / Hyperliquid。优先模板比例下单：账户下单量 = TV contracts × (账户模板本金/模板本金)；不满足条件回退固定 USDT。Hyperliquid: API Key=walletAddress，Secret=privateKey。">?</span></h2>
+      <h2 class="title-line">交易账户 <span class="help-tip" tabindex="0" data-tip="支持 Binance / OKX / Hyperliquid。选「跟随模板下单」时：各账户下单量≈TV 发来的张数 ×（该账户模板本金 ÷ 机器人里的全局模板本金）；对不上就用各账户设的固定 USDT。OKX 要填 API Key、Secret、Passphrase。Hyperliquid：API Key=钱包地址，Secret=私钥。">?</span></h2>
       <p class="hint" id="accountsHint" style="margin-top: 0.35rem;">请先填写并保存「访问密钥」。</p>
       <div class="table-wrap" id="accountsTableWrap" style="display: none; max-height: none;">
         <table class="siglog" id="accountsTable" style="font-size: 0.78rem;">
-          <thead>
-            <tr>
-              <th>备注</th>
-              <th>交易所</th>
-              <th>API Key</th>
-              <th>Secret</th>
-              <th>模板本金(USDT)</th>
-              <th>固定USDT(回退)</th>
-              <th>启用</th>
-              <th>Webhook</th>
-              <th></th>
-            </tr>
-          </thead>
+          <thead id="accountsTableHead"></thead>
           <tbody id="accountsTableBody"></tbody>
         </table>
       </div>
@@ -730,7 +878,7 @@
 
     <div id="panel-tv" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">TradingView 与模拟 Webhook <span class="help-tip" tabindex="0" data-tip="告警 URL 填 /webhook，Header 的 X-TV-Secret 需与 .env 一致。此处模拟请求为真实下单，建议先小仓位验证。">?</span></h2>
+      <h2 class="title-line">TradingView 与模拟 Webhook <span class="help-tip" tabindex="0" data-tip="告警 URL 填 你的网站/webhook，请求头 X-TV-Secret 要和 .env 里一致。下面「发送模拟 Webhook」会真的去下单，先小金额试。消息里如果写了 quote_amount，会优先按「花多少 U」去下；没写时，若机器人是「跟随模板下单」，各账户还走自己设的固定 USDT。">?</span></h2>
       <p class="hint" style="margin-top: 0;">告警 URL：<code id="webhookHint">https://你的域名/webhook</code></p>
       <label for="webhookTestBody">消息体 JSON</label>
       <textarea id="webhookTestBody" style="min-height: 88px;">{"action":"buy","symbol":"ETHUSDT","quote_amount":1000}</textarea>
@@ -739,10 +887,12 @@
       </div>
       <div id="webhookTestPlain" class="balance-plain" style="display: none; margin-top: 0.75rem;"></div>
       <div id="outWebhookTest" class="out" style="display: none; margin-top: 0.5rem;"></div>
-      <p class="balance-raw-title" style="margin-top: 1rem;">TV 策略告警消息（自动推断开/加/减/平）</p>
-      <p class="hint" style="margin-top: 0.35rem;">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
+      <div class="tv-snippet-head">
+        <p class="balance-raw-title">跟随模板下单</p>
+        <span class="help-tip" tabindex="0" data-tip="大白话：先在「机器人设置」里选「跟随模板下单」，再给每个交易账户填「模板本金」。下面这段 JSON 让 TV 把策略张数放在 contracts；机器人按「TV 张数 ×（该账户模板本金 ÷ 上面的全局模板本金）」去各账户下单。没带张数或算不了时，就用该账户里设的固定 USDT 兜底。">?</span>
+      </div>
       <div class="copy-row">
-        <textarea id="tplTvStrategyWebhook" readonly style="min-height: 140px; font-size: 0.78rem;">{
+        <textarea id="tplTvTemplateCapitalWebhook" readonly style="min-height: 150px; font-size: 0.78rem;">{
   "ticker": "{{ticker}}",
   "action": "{{strategy.order.action}}",
   "symbol": "{{ticker}}",
@@ -753,7 +903,27 @@
 }</textarea>
       </div>
       <div class="row" style="margin-top: 0.5rem;">
-        <button type="button" class="secondary" id="btnCopyTvStrategyWebhook">复制告警 JSON</button>
+        <button type="button" class="secondary" id="btnCopyTvTemplateCapitalWebhook">复制「跟随模板下单」JSON</button>
+      </div>
+
+      <div class="tv-snippet-head">
+        <p class="balance-raw-title">跟随TV策略下单</p>
+        <span class="help-tip" tabindex="0" data-tip="大白话：先在「机器人设置」里选「跟随TV策略下单」。机器人看数的顺序：先看 quote_amount（只表示要花多少 U），没有再看 amount（多少币），最后看 contracts（多少张）。别把张数写进 quote_amount，不然会当成要花那么多 U（比如写 94 就约等于下 94U）；要按张、按币就只用 amount 和 contracts。">?</span>
+      </div>
+      <div class="copy-row">
+        <textarea id="tplTvFollowAmountWebhook" readonly style="min-height: 170px; font-size: 0.78rem;">{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "symbol": "{{ticker}}",
+  "amount": "{{strategy.order.contracts}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "market_position": "{{strategy.market_position}}",
+  "position_size": "{{strategy.position_size}}",
+  "contracts": "{{strategy.order.contracts}}"
+}</textarea>
+      </div>
+      <div class="row" style="margin-top: 0.5rem;">
+        <button type="button" class="secondary" id="btnCopyTvFollowAmountWebhook">复制「跟随TV策略下单」JSON</button>
       </div>
     </div>
     </div>
@@ -783,6 +953,8 @@
     const accountsHint = document.getElementById("accountsHint");
     let accountsState = [];
     let dashboardRole = null; // admin | viewer | null
+    /** 交易记录表格估算手续费：名义×费率（与 .env DISPLAY_EST_FEE_RATE 同步，默认 0.0005） */
+    let displayEstFeeRate = 0.0005;
     const outBalance = document.getElementById("outBalance");
     const balancePlain = document.getElementById("balancePlain");
     const balanceRawTitle = document.getElementById("balanceRawTitle");
@@ -1005,8 +1177,14 @@
 
     function estimateTradeFeeAndPnl(items) {
       // 展示层估算：
-      // 1) fee 统一按 成交价*数量*0.05%；
+      // 1) fee = 成交价*数量*displayEstFeeRate（费率来自 .env DISPLAY_EST_FEE_RATE，默认 0.05%）；
       // 2) pnl 缺失时，按同账户同品种的净仓开平估算已实现收益。
+      const rate =
+        typeof displayEstFeeRate === "number" &&
+        displayEstFeeRate >= 0 &&
+        displayEstFeeRate <= 0.05
+          ? displayEstFeeRate
+          : 0.0005;
       const feeByIdx = {};
       const grossPnlByIdx = {};
       const netPnlByIdx = {};
@@ -1021,7 +1199,7 @@
         const px = _numOrNull(row.order_average);
         let fee = null;
         if (qty != null && qty > 0 && px != null && px > 0) {
-          fee = Math.abs(px * qty * 0.0005);
+          fee = Math.abs(px * qty * rate);
         }
         if (fee != null) feeByIdx[idx] = fee;
         if (!(dir && qty != null && qty > 0 && px != null && px > 0)) continue;
@@ -1538,10 +1716,53 @@
       updateButtons();
     }
 
+    function snapshotAccountsFromTable() {
+      const tb = document.getElementById("accountsTableBody");
+      if (!tb) return null;
+      const rows = [];
+      tb.querySelectorAll("tr[data-idx]").forEach((tr) => {
+        const idAttr = tr.getAttribute("data-id") || "";
+        const prev = accountsState.find((x) => x.id === idAttr) || {};
+        const g = (n) => tr.querySelector(`[name="${n}"]`);
+        const exchange = g("exchange")?.value || prev.exchange || "binance";
+        rows.push({
+          id: idAttr || prev.id || newAccountId(),
+          remark: g("remark")?.value?.trim() || "未命名",
+          exchange,
+          api_key: g("api_key")?.value || "",
+          secret: g("secret")?.value || "",
+          password: exchange === "okx" ? (g("password")?.value || "") : "",
+          api_key_preview: prev.api_key_preview || "",
+          has_secret: prev.has_secret || false,
+          has_password: prev.has_password || false,
+          template_capital_usdt: parseFloat(g("template_capital_usdt")?.value) || 0,
+          fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
+          enabled: g("enabled")?.checked !== false,
+          webhook_enabled: g("webhook_enabled")?.checked !== false,
+        });
+      });
+      return rows;
+    }
+
     function renderAccountsTable() {
+      const head = document.getElementById("accountsTableHead");
       const tb = document.getElementById("accountsTableBody");
       const wrap = accountsTableWrap;
-      if (!tb) return;
+      if (!tb || !head) return;
+      const hasOkx = accountsState.some((row) => (row.exchange || "binance") === "okx");
+      head.innerHTML =
+        `<tr>` +
+        `<th>账户名称</th>` +
+        `<th>交易所</th>` +
+        `<th>API Key</th>` +
+        `<th>Secret Key</th>` +
+        (hasOkx ? `<th>Passphrase</th>` : ``) +
+        `<th>模板本金(USDT)</th>` +
+        `<th>固定USDT(回退)</th>` +
+        `<th>启用</th>` +
+        `<th>Webhook</th>` +
+        `<th></th>` +
+        `</tr>`;
       if (accountsState.length === 0) {
         tb.innerHTML = "";
         if (wrap) wrap.style.display = "none";
@@ -1550,20 +1771,29 @@
       if (wrap) wrap.style.display = "block";
       tb.innerHTML = accountsState
         .map((row, i) => {
+          const exName = (row.exchange || "binance");
+          const isOkx = exName === "okx";
           const phK = row.api_key_preview
             ? `已保存 ${escHtml(row.api_key_preview)}`
             : "新账户请填写";
           const phS = row.has_secret ? "留空不改" : "新账户必填";
+          const phP = row.has_password ? "留空不改（OKX Passphrase）" : "OKX 必填";
           const rid = row.id || "";
           return (
             `<tr data-idx="${i}" data-id="${escHtml(rid)}">` +
             `<td><input type="text" name="remark" value="${escHtml(row.remark || "")}" style="width:100%;min-width:5rem" /></td>` +
             `<td><select name="exchange">` +
-            `<option value="binance" ${((row.exchange || "binance") === "binance") ? "selected" : ""}>Binance</option>` +
-            `<option value="hyperliquid" ${((row.exchange || "binance") === "hyperliquid") ? "selected" : ""}>Hyperliquid</option>` +
+            `<option value="binance" ${exName === "binance" ? "selected" : ""}>Binance</option>` +
+            `<option value="okx" ${exName === "okx" ? "selected" : ""}>OKX</option>` +
+            `<option value="hyperliquid" ${exName === "hyperliquid" ? "selected" : ""}>Hyperliquid</option>` +
             `</select></td>` +
             `<td><input type="text" name="api_key" placeholder="${phK}" value="${escHtml(row.api_key || "")}" style="width:100%;min-width:6rem" autocomplete="off" /></td>` +
             `<td><input type="password" name="secret" placeholder="${phS}" value="" autocomplete="off" style="width:100%;min-width:5rem" /></td>` +
+            (hasOkx
+              ? `<td>${isOkx
+                  ? `<input type="password" name="password" placeholder="${phP}" value="" autocomplete="off" style="width:100%;min-width:5rem" />`
+                  : `<input type="text" value="—" disabled style="width:100%;min-width:5rem;opacity:0.7" />`}</td>`
+              : ``) +
             `<td><input type="number" name="template_capital_usdt" step="0.01" min="0" value="${Number(row.template_capital_usdt) || 0}" style="width:6.5rem" /></td>` +
             `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:6rem" /></td>` +
             `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
@@ -1582,6 +1812,16 @@
           populateAccountSelects();
         });
       });
+      tb.querySelectorAll('select[name="exchange"]').forEach((sel) => {
+        sel.addEventListener("change", () => {
+          const snapshot = snapshotAccountsFromTable();
+          if (snapshot) {
+            accountsState = snapshot;
+          }
+          renderAccountsTable();
+          populateAccountSelects();
+        });
+      });
     }
 
     function newAccountId() {
@@ -1592,30 +1832,8 @@
     }
 
     function collectAccountsFromTable() {
-      const tb = document.getElementById("accountsTableBody");
-      if (!tb) return [];
-      const rows = [];
-      tb.querySelectorAll("tr[data-idx]").forEach((tr) => {
-        const idAttr = tr.getAttribute("data-id") || "";
-        const prev =
-          accountsState.find((x) => x.id === idAttr) || {};
-        const g = (n) => tr.querySelector(`[name="${n}"]`);
-        const ak = g("api_key")?.value?.trim() || "";
-        const sk = g("secret")?.value?.trim() || "";
-        rows.push({
-          id: idAttr || prev.id || newAccountId(),
-          remark: g("remark")?.value?.trim() || "未命名",
-          exchange: g("exchange")?.value || "binance",
-          api_key: ak,
-          secret: sk,
-          password: "",
-          template_capital_usdt: parseFloat(g("template_capital_usdt")?.value) || 0,
-          fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
-          enabled: g("enabled")?.checked !== false,
-          webhook_enabled: g("webhook_enabled")?.checked !== false,
-        });
-      });
-      return rows;
+      const rows = snapshotAccountsFromTable();
+      return rows || [];
     }
 
     async function loadAccounts() {
@@ -1650,8 +1868,10 @@
           exchange: a.exchange || "binance",
           api_key: "",
           secret: "",
+          password: "",
           api_key_preview: a.api_key_preview,
-          has_secret: a.has_secret,
+          has_secret: !!a.has_secret,
+          has_password: !!a.has_password,
           template_capital_usdt: Number(a.template_capital_usdt) || 0,
           fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
@@ -1700,8 +1920,10 @@
           exchange: a.exchange || "binance",
           api_key: "",
           secret: "",
+          password: "",
           api_key_preview: a.api_key_preview,
-          has_secret: a.has_secret,
+          has_secret: !!a.has_secret,
+          has_password: !!a.has_password,
           template_capital_usdt: Number(a.template_capital_usdt) || 0,
           fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
@@ -1715,6 +1937,48 @@
       } catch (e) {
         alert(String(e));
       }
+    }
+
+    function updateWebhookSizingHint() {
+      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      const tipEl = document.getElementById("webhookSizingModeTip");
+      if (!tipEl) return;
+      if (mode === "follow_tv") {
+        tipEl.setAttribute(
+          "data-tip",
+          "大白话（跟随TV策略下单）：机器人先看 quote_amount，有就只当「要花多少 U」，别把张数填这里。没有再看 amount（多少币）、最后看 contracts（多少张）。三个数如果碰巧一样，会优先把 quote_amount 当 U，容易误下大单，记得检查 TV 告警 JSON。只要带了有效的 quote_amount，两种模式都会优先按 U 名义下。"
+        );
+      } else {
+        tipEl.setAttribute(
+          "data-tip",
+          "大白话（跟随模板下单）：TV 告警里要带 contracts（策略张数）。各账户实际张数 ≈ TV 张数 ×（该账户模板本金 ÷ 上面全局模板本金）。没带张数或条件不够时，用各账户设的固定 USDT 下单。若告警里带了 quote_amount 且是有效数字，任意模式都会优先按 U 名义下。"
+        );
+      }
+    }
+
+    function updateTemplateBaseFieldHint() {
+      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      const wrap = document.getElementById("templateBaseWrap");
+      const tipEl = document.getElementById("templateBaseTip");
+      if (!wrap || !tipEl) return;
+      if (mode === "follow_tv") {
+        wrap.classList.add("template-base-dim");
+        tipEl.setAttribute(
+          "data-tip",
+          "当前是「跟随TV策略下单」：这个全局模板本金暂时不参与计算；你仍可填着（例如 1000），以后切回「跟随模板下单」不用再改。"
+        );
+      } else {
+        wrap.classList.remove("template-base-dim");
+        tipEl.setAttribute(
+          "data-tip",
+          "大白话：这是「策略跑在多少 U 模板上」的分母。配合每个账户里填的模板本金，一起把 TV 发来的张数按比例放大或缩小到各账户。"
+        );
+      }
+    }
+
+    function updateWebhookSettingsPanel() {
+      updateWebhookSizingHint();
+      updateTemplateBaseFieldHint();
     }
 
     async function fetchStatus() {
@@ -1749,7 +2013,15 @@
           dashboardRole === "admin"
             ? '<span class="pill on">主密钥（可读写）</span>'
             : '<span class="pill off">访客只读</span>';
+        const sizingModeText =
+          d.webhook_sizing_mode === "follow_tv"
+            ? "跟随TV策略下单"
+            : "跟随模板下单";
         const ac = typeof d.accounts_count === "number" ? d.accounts_count : "—";
+        const estFeePct =
+          (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0
+            ? d.display_est_fee_rate
+            : 0.0005) * 100;
         const envLine = d.env_path
           ? `<br/><span style="font-size:0.75rem;color:var(--muted)">配置路径 ${d.env_file_exists ? "✓" : "✗"}</span> <code style="font-size:0.7rem">${d.env_path}</code>`
           : "";
@@ -1760,10 +2032,15 @@
           `<span>已配置 API 的账户</span> ${api}<br/>` +
           `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
           `<span>TV Webhook 密钥</span> ${wh}<br/>` +
-          `<span>模板本金（USDT）</span> ${Number(d.template_base_capital_usdt) || 0}<br/>` +
-          `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}` +
+          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}<br/>` +
+          `<span>全局模板本金</span> ${Number(d.template_base_capital_usdt) || 0} USDT<br/>` +
+          `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}<br/>` +
+          `<span>交易记录估算手续费率</span> ${estFeePct.toFixed(4)}% <span style="font-size:0.75rem;color:var(--muted)">（.env DISPLAY_EST_FEE_RATE）</span>` +
           envLine;
         updateButtons();
+        if (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0 && d.display_est_fee_rate <= 0.05) {
+          displayEstFeeRate = d.display_est_fee_rate;
+        }
         const sle = document.getElementById("stopLossEnabled");
         if (sle && typeof d.stop_loss_enabled === "boolean") {
           sle.checked = d.stop_loss_enabled;
@@ -1771,6 +2048,19 @@
         const slp = document.getElementById("stopLossPct");
         if (slp && d.stop_loss_pct != null && !Number.isNaN(Number(d.stop_loss_pct))) {
           slp.value = String(d.stop_loss_pct);
+        }
+        const sizingModeEl = document.getElementById("webhookSizingMode");
+        if (sizingModeEl && d.webhook_sizing_mode) {
+          sizingModeEl.value = String(d.webhook_sizing_mode);
+          updateWebhookSettingsPanel();
+        }
+        const templateBaseEl = document.getElementById("templateBaseCapitalUsdt");
+        if (
+          templateBaseEl &&
+          d.template_base_capital_usdt != null &&
+          !Number.isNaN(Number(d.template_base_capital_usdt))
+        ) {
+          templateBaseEl.value = String(d.template_base_capital_usdt);
         }
       } catch (e) {
         dashboardRole = null;
@@ -1788,8 +2078,15 @@
       if (!ensureAdminAction()) return;
       const pctRaw = document.getElementById("stopLossPct")?.value;
       const pct = parseFloat(pctRaw);
+      const templateBaseRaw = document.getElementById("templateBaseCapitalUsdt")?.value;
+      const templateBase = parseFloat(templateBaseRaw);
+      const sizingMode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
       if (!Number.isFinite(pct) || pct <= 0 || pct > 50) {
         alert("止损幅度须在 0～50% 之间（不含 0）");
+        return;
+      }
+      if (!Number.isFinite(templateBase) || templateBase < 0) {
+        alert("模板本金不能小于 0");
         return;
       }
       try {
@@ -1799,6 +2096,8 @@
           body: JSON.stringify({
             stop_loss_enabled: !!document.getElementById("stopLossEnabled")?.checked,
             stop_loss_pct: pct,
+            webhook_sizing_mode: sizingMode,
+            template_base_capital_usdt: templateBase,
           }),
         });
         const t = await r.text();
@@ -1812,7 +2111,7 @@
           alert(d.error || t || "保存失败");
           return;
         }
-        alert("止损设置已保存");
+        alert("机器人设置已保存");
         await fetchStatus();
       } catch (e) {
         alert(String(e));
@@ -1982,6 +2281,10 @@
     if (btnReloadAccounts) btnReloadAccounts.addEventListener("click", loadAccounts);
     secretEl.addEventListener("input", updateButtons);
     btnBalance.addEventListener("click", doBalance);
+    const webhookSizingModeEl = document.getElementById("webhookSizingMode");
+    if (webhookSizingModeEl) {
+      webhookSizingModeEl.addEventListener("change", updateWebhookSettingsPanel);
+    }
     const accountSelectBalanceEl = document.getElementById("accountSelectBalance");
     if (accountSelectBalanceEl) {
       accountSelectBalanceEl.addEventListener("change", () => {
@@ -2139,21 +2442,36 @@
       });
     }
 
-    document.getElementById("btnCopyTvStrategyWebhook")?.addEventListener("click", async () => {
-      const el = document.getElementById("tplTvStrategyWebhook");
-      const b = document.getElementById("btnCopyTvStrategyWebhook");
-      if (!el) return;
-      try {
-        await navigator.clipboard.writeText(el.value);
-        if (b) b.textContent = "已复制";
-        setTimeout(() => {
-          if (b) b.textContent = "复制告警 JSON";
-        }, 2000);
-      } catch {
-        el.select();
-        document.execCommand("copy");
-      }
-    });
+    function bindCopyButton(buttonId, textareaId, okText, restoreText) {
+      document.getElementById(buttonId)?.addEventListener("click", async () => {
+        const el = document.getElementById(textareaId);
+        const b = document.getElementById(buttonId);
+        if (!el) return;
+        try {
+          await navigator.clipboard.writeText(el.value);
+          if (b) b.textContent = okText;
+          setTimeout(() => {
+            if (b) b.textContent = restoreText;
+          }, 2000);
+        } catch {
+          el.select();
+          document.execCommand("copy");
+        }
+      });
+    }
+
+    bindCopyButton(
+      "btnCopyTvTemplateCapitalWebhook",
+      "tplTvTemplateCapitalWebhook",
+      "已复制",
+      "复制「跟随模板下单」JSON"
+    );
+    bindCopyButton(
+      "btnCopyTvFollowAmountWebhook",
+      "tplTvFollowAmountWebhook",
+      "已复制",
+      "复制「跟随TV策略下单」JSON"
+    );
 
     const host = window.location.origin;
     document.getElementById("webhookHint").textContent = host + "/webhook";
@@ -2194,6 +2512,7 @@
     fetchStatus();
     loadAccounts();
     loadAccountLog();
+    updateWebhookSettingsPanel();
   </script>
 </body>
 </html>

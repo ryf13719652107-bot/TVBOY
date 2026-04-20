@@ -9,3 +9,5 @@ __pycache__/
 # 本地虚拟环境
 .venv/
 venv/
+# 本地 ngrok / 隧道脚本（非机器人运行所需）
+run-ngrok*.bat

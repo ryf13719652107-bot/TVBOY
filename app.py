@@ -1,5 +1,5 @@
 """
-TradingView Webhook -> 币安下单服务。
+TradingView Webhook -> 多交易所下单服务。
 运行: 在项目根目录或本目录下设置好环境变量后执行
   python -m flask --app app run --host 0.0.0.0 --port 5000
 或: python app.py
@@ -170,6 +170,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _parse_display_est_fee_rate(value: str | None, default: float = 0.0005) -> float:
+    """网页「交易记录」估算手续费费率：名义=成交价×数量，手续费=名义×费率。默认 0.0005=0.05%。"""
+    if value is None:
+        return default
+    s = str(value).strip()
+    if not s:
+        return default
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return default
+    if v < 0:
+        return default
+    if v > 0.02:
+        return 0.02
+    return v
+
+
 WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
 # 网页控制台专用（可与 TV_WEBHOOK_SECRET 分开）；未设置时回退为 TV_WEBHOOK_SECRET
 DASHBOARD_SECRET = (os.getenv("DASHBOARD_SECRET") or "").strip()
@@ -188,6 +206,15 @@ PRELOAD_MARKETS_ON_STARTUP = (
 )
 # 测试网（需使用币安测试网密钥）
 USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
+
+
+def _load_okx_td_mode() -> str:
+    """OKX 永续下单 tdMode：cross 全仓 / isolated 逐仓，须与 OKX 账户实际模式一致。"""
+    v = (os.getenv("OKX_TD_MODE", "cross") or "cross").strip().lower()
+    return v if v in ("cross", "isolated") else "cross"
+
+
+OKX_TD_MODE = _load_okx_td_mode()
 # Webhook 下单后非关键后处理延迟秒数（止损/撤单/日志落盘）
 WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
 # Webhook 多账户并发下单线程上限（默认 8）
@@ -206,6 +233,8 @@ BALANCE_CACHE_TTL_SEC = float(os.getenv("BALANCE_CACHE_TTL_SEC", "2"))
 # 热日志上限（超出后自动归档到 *.archive.jsonl）
 LOG_HOT_MAX_EXECUTION = _env_int("LOG_HOT_MAX_EXECUTION", 50000)
 LOG_HOT_MAX_SIGNAL = _env_int("LOG_HOT_MAX_SIGNAL", 20000)
+# 控制台「交易记录」表格估算手续费（成交价×数量×费率）；真实扣费仍以交易所 order_fee 为准
+DISPLAY_EST_FEE_RATE = _parse_display_est_fee_rate(os.getenv("DISPLAY_EST_FEE_RATE"))
 
 # Webhook 聚合信号 / 按账户执行记录：持久化到 data/*.json，不自动删除条数、不自动清空
 ACCOUNT_LOG_QUERY_MAX = 50000
@@ -396,11 +425,18 @@ def _default_bot_settings() -> dict[str, Any]:
     return {
         "stop_loss_enabled": os.getenv("STOP_LOSS_ENABLED", "").lower() == "true",
         "stop_loss_pct": float(os.getenv("STOP_LOSS_PCT", "3.33")),
+        "webhook_sizing_mode": (
+            os.getenv("WEBHOOK_SIZING_MODE", "template_or_fixed").strip().lower()
+            or "template_or_fixed"
+        ),
+        "template_base_capital_usdt": float(
+            os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0")
+        ),
     }
 
 
 def load_bot_settings() -> dict[str, Any]:
-    """开仓后限价止损：全局开关与百分比（data/bot_settings.json，未创建时回退 .env 默认）。"""
+    """机器人全局设置（data/bot_settings.json，未创建时回退 .env 默认）。"""
     base = _default_bot_settings()
     if not _BOT_SETTINGS_PATH.is_file():
         return base
@@ -412,18 +448,42 @@ def load_bot_settings() -> dict[str, Any]:
                 base["stop_loss_enabled"] = bool(data["stop_loss_enabled"])
             if "stop_loss_pct" in data:
                 base["stop_loss_pct"] = float(data["stop_loss_pct"])
+            if "webhook_sizing_mode" in data:
+                mode = str(data["webhook_sizing_mode"] or "").strip().lower()
+                if mode in ("template_or_fixed", "follow_tv"):
+                    base["webhook_sizing_mode"] = mode
+            if "template_base_capital_usdt" in data:
+                base["template_base_capital_usdt"] = float(
+                    data["template_base_capital_usdt"]
+                )
     except Exception as e:
         logger.warning("读取 bot_settings 失败: %s", e)
+    if base["template_base_capital_usdt"] < 0:
+        base["template_base_capital_usdt"] = 0.0
+    if base["webhook_sizing_mode"] not in ("template_or_fixed", "follow_tv"):
+        base["webhook_sizing_mode"] = "template_or_fixed"
     return base
 
 
 def save_bot_settings(settings: dict[str, Any]) -> None:
     _BOT_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _BOT_SETTINGS_PATH.with_suffix(".tmp")
+    webhook_sizing_mode = str(
+        settings.get("webhook_sizing_mode", "template_or_fixed") or "template_or_fixed"
+    ).strip().lower()
+    if webhook_sizing_mode not in ("template_or_fixed", "follow_tv"):
+        webhook_sizing_mode = "template_or_fixed"
+    template_base_capital_usdt = float(
+        settings.get("template_base_capital_usdt", TEMPLATE_BASE_CAPITAL_USDT)
+    )
+    if template_base_capital_usdt < 0:
+        template_base_capital_usdt = 0.0
     payload = {
         "version": 1,
         "stop_loss_enabled": bool(settings.get("stop_loss_enabled")),
         "stop_loss_pct": float(settings.get("stop_loss_pct", 3.33)),
+        "webhook_sizing_mode": webhook_sizing_mode,
+        "template_base_capital_usdt": template_base_capital_usdt,
     }
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -1195,7 +1255,8 @@ def refresh_env() -> None:
     global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, TEMPLATE_BASE_CAPITAL_USDT
     global USE_TESTNET, WEBHOOK_POST_DELAY_SEC, PRELOAD_MARKETS_ON_STARTUP
     global BALANCE_CACHE_TTL_SEC, WEBHOOK_TRADE_MAX_WORKERS, WEBHOOK_FINALIZE_MAX_WORKERS, WEBHOOK_LOG_PAYLOAD
-    global LOG_HOT_MAX_EXECUTION, LOG_HOT_MAX_SIGNAL
+    global LOG_HOT_MAX_EXECUTION, LOG_HOT_MAX_SIGNAL, DISPLAY_EST_FEE_RATE
+    global OKX_TD_MODE
     load_dotenv(_env, override=True)
     WEBHOOK_SECRET = os.getenv("TV_WEBHOOK_SECRET", "")
     DASHBOARD_SECRET = (os.getenv("DASHBOARD_SECRET") or "").strip()
@@ -1216,10 +1277,12 @@ def refresh_env() -> None:
     BALANCE_CACHE_TTL_SEC = float(os.getenv("BALANCE_CACHE_TTL_SEC", "2"))
     LOG_HOT_MAX_EXECUTION = _env_int("LOG_HOT_MAX_EXECUTION", 50000)
     LOG_HOT_MAX_SIGNAL = _env_int("LOG_HOT_MAX_SIGNAL", 20000)
+    DISPLAY_EST_FEE_RATE = _parse_display_est_fee_rate(os.getenv("DISPLAY_EST_FEE_RATE"))
     PRELOAD_MARKETS_ON_STARTUP = (
         os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
         in ("1", "true", "yes", "on")
     )
+    OKX_TD_MODE = _load_okx_td_mode()
 
 
 def preload_trade_markets_on_startup() -> None:
@@ -1250,7 +1313,7 @@ def start_preload_trade_markets_in_background() -> None:
 
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
     """
-    按账户创建/复用 ccxt 实例（binance / hyperliquid）。
+    按账户创建/复用 ccxt 实例（binance / okx / hyperliquid）。
 
     purpose:
       - trade: 下单关键路径（/webhook、/api/order）
@@ -1289,6 +1352,47 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
         ex.options["fetchCurrencies"] = False
         if USE_TESTNET:
             ex.set_sandbox_mode(True)
+    elif ex_name == "okx":
+        default_type = "swap" if BINANCE_DEFAULT_TYPE == "future" else "spot"
+        password = (account.get("password") or "").strip()
+        if not password:
+            raise ValueError("OKX 账户未配置 API Password / Passphrase")
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+        config = {
+            "apiKey": api_key,
+            "secret": secret,
+            "password": password,
+            "options": {
+                "defaultType": default_type,
+                "marginMode": OKX_TD_MODE,
+                "defaultMarginMode": OKX_TD_MODE,
+            },
+            "enableRateLimit": True,
+        }
+        if proxy:
+            config["proxy"] = proxy
+        ex = ccxt.okx(config)
+
+        # 默认关闭：每次新建 ccxt 实例都查余额会拖慢首单并增加限频风险；排查 OKX 时设 OKX_DEBUG_BALANCE=true
+        if os.getenv("OKX_DEBUG_BALANCE", "").lower() in ("1", "true", "yes", "on"):
+            try:
+                logger.info("[OKX调试] 查询账户余额…")
+                balance = ex.fetch_balance({"type": "swap"})
+                usdt_balance = balance.get("USDT", {}).get("free", 0)
+                total_balance = balance.get("USDT", {}).get("total", 0)
+                logger.info(
+                    "[OKX调试] 合约账户余额 - 可用: %s USDT, 总额: %s USDT",
+                    usdt_balance,
+                    total_balance,
+                )
+                spot_balance = ex.fetch_balance({"type": "spot"})
+                spot_usdt = spot_balance.get("USDT", {}).get("free", 0)
+                logger.info("[OKX调试] 现货账户余额: %s USDT", spot_usdt)
+            except Exception as e:
+                logger.warning("[OKX调试] 余额查询失败: %s", e)
+
+        if USE_TESTNET:
+            ex.set_sandbox_mode(True)
     elif ex_name == "hyperliquid":
         default_type = "swap" if BINANCE_DEFAULT_TYPE == "future" else "spot"
         # 复用现有字段：
@@ -1303,7 +1407,7 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
             }
         )
     else:
-        raise ValueError("暂仅支持 binance / hyperliquid")
+        raise ValueError("暂仅支持 binance / okx / hyperliquid")
     with _exchange_cache_lock:
         _exchange_cache[cache_key] = ex
     return ex
@@ -1346,14 +1450,56 @@ def build_order_payload_for_account(
     base: dict[str, Any], account: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    多账户下单二选一：
-    1) 模板比例模式：.env 设 TEMPLATE_BASE_CAPITAL_USDT>0 且 TV 提供 contracts，
-       使用 账户本金/template本金 比例换算 amount；
-    2) 回退固定名义：使用账户 fixed_quote_usdt 作为 quote_amount。
+    多账户下单支持两种模式：
+    1) template_or_fixed：优先按模板本金比例把 TV contracts 换算到各账户；
+       若条件不满足则回退账户 fixed_quote_usdt。
+    2) follow_tv：优先直接跟随 TradingView 载荷中的 amount / quote_amount / contracts；
+       若 TV 未提供有效下单量则回退账户 fixed_quote_usdt。
+    若请求体含有效 quote_amount（含控制台「模拟 Webhook」），在两种模式下均优先使用该 USDT 名义；
+    quote_amount 必须为「打算花多少 USDT」的数字，勿把张数/标的币数量写入该字段（否则会被当作 USDT）。
     """
     p = dict(base)
+    settings = load_bot_settings()
+    sizing_mode = str(
+        settings.get("webhook_sizing_mode") or "template_or_fixed"
+    ).strip().lower()
+    if sizing_mode not in ("template_or_fixed", "follow_tv"):
+        sizing_mode = "template_or_fixed"
+
+    tv_quote_raw = base.get("quote_amount")
+    if tv_quote_raw is not None:
+        try:
+            qv = float(str(tv_quote_raw).replace(",", "").strip())
+        except (TypeError, ValueError):
+            qv = None
+        if qv is not None and qv > 0:
+            p["quote_amount"] = qv
+            p.pop("amount", None)
+            p["_sizing_mode"] = "payload_quote_amount"
+            return p
+
     tv_contracts = _payload_contracts_amount(base)
-    tpl_base = float(TEMPLATE_BASE_CAPITAL_USDT or 0)
+    tv_amount_raw = base.get("amount")
+
+    if sizing_mode == "follow_tv":
+        if tv_amount_raw is not None:
+            try:
+                tv_amount = float(tv_amount_raw)
+            except (TypeError, ValueError):
+                tv_amount = None
+            if tv_amount is not None and tv_amount > 0:
+                p["amount"] = tv_amount
+                p.pop("quote_amount", None)
+                p["_sizing_mode"] = "follow_tv_amount"
+                return p
+        if tv_contracts is not None and tv_contracts > 0:
+            p["amount"] = tv_contracts
+            p.pop("quote_amount", None)
+            p["_sizing_mode"] = "follow_tv_contracts"
+            p["_tv_contracts_raw"] = tv_contracts
+            return p
+
+    tpl_base = float(settings.get("template_base_capital_usdt") or 0)
     acc_cap = float(account.get("template_capital_usdt") or 0)
     if tpl_base > 0 and tv_contracts is not None and acc_cap > 0:
         scale = acc_cap / tpl_base
@@ -1365,10 +1511,15 @@ def build_order_payload_for_account(
         p["_sizing_mode"] = "template_contracts"
         p["_template_scale"] = scale
         p["_template_contracts_raw"] = tv_contracts
+        p["_template_base_capital_usdt"] = tpl_base
         return p
 
     fq = float(account.get("fixed_quote_usdt") or 0)
     if fq <= 0:
+        if sizing_mode == "follow_tv":
+            raise ValueError(
+                f"账户「{account.get('remark')}」未设置固定下单金额（USDT），且 TradingView 载荷缺少有效 amount / quote_amount / contracts"
+            )
         raise ValueError(
             f"账户「{account.get('remark')}」未设置固定下单金额（USDT），且模板比例条件未满足"
         )
@@ -1592,6 +1743,54 @@ def quote_to_base_amount(exchange, symbol: str, quote_usdt: float) -> float:
     return quote_usdt / price
 
 
+def _okx_linear_swap_base_qty_to_contract_amount(
+    exchange, symbol: str, base_coin_qty: float
+) -> float:
+    """
+    OKX USDT 线性永续：REST 的 sz / ccxt 传入的 amount 步长按「张」计，每张 = contractSize(ctVal) 个标的币。
+    将「希望成交的标的币数量」换成张数，避免把 87 ENA 误当成 87 张（每张 10 ENA → 870 ENA）。
+    """
+    if _exchange_id(exchange) != "okx" or BINANCE_DEFAULT_TYPE != "future":
+        return float(base_coin_qty)
+    mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+    if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
+        return float(base_coin_qty)
+    ct = float(mkt.get("contractSize") or 0)
+    if ct <= 0:
+        return float(base_coin_qty)
+    return float(base_coin_qty) / ct
+
+
+def _okx_linear_swap_amount_to_base(
+    exchange,
+    symbol: str,
+    amount_val: float,
+    payload: dict[str, Any],
+    *,
+    from_position_contracts: bool,
+) -> float:
+    """
+    OKX USDT 线性永续：内部先统一到「标的币数量」；fetch_positions / TV 的 contracts 多为「张」，
+    仅在明确来自张数语义时乘以 contractSize(ctVal)。下单前再经 _okx_linear_swap_base_qty_to_contract_amount 换成张数。
+    币安等所原样返回。
+    """
+    if _exchange_id(exchange) != "okx" or BINANCE_DEFAULT_TYPE != "future":
+        return amount_val
+    mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+    if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
+        return amount_val
+    ct = float(mkt.get("contractSize") or 0)
+    if ct <= 0:
+        return amount_val
+    mode = str(payload.get("_sizing_mode") or "")
+    if from_position_contracts or mode in (
+        "follow_tv_contracts",
+        "template_contracts",
+    ):
+        return float(amount_val) * ct
+    return float(amount_val)
+
+
 def _market_price_for_order(exchange, symbol: str) -> float | None:
     """部分交易所（如 hyperliquid）市价单要求参考价用于滑点。"""
     if _exchange_id(exchange) != "hyperliquid":
@@ -1623,9 +1822,10 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
     请求体字段（常用）:
       action / side: buy | sell
       symbol: BTCUSDT 或 BTC/USDT（必填）
-      quote_amount: 用多少 USDT 市价（现货买单 / U 本位合约市价常用）
+      quote_amount: 用多少 USDT 市价（名义 USDT；先换标的币数量再换 OKX「张」）
       amount: 基础币数量（与 quote_amount 二选一，优先 quote_amount）
       reduce_only: true/false（合约平仓）
+    OKX USDT 线性永续：TV/持仓张数先乘 ctVal 得到标的币数量，再除以 ctVal 得到 API 张数 sz。
     """
     sym_raw = payload.get("symbol") or payload.get("ticker") or ""
     if not sym_raw:
@@ -1651,6 +1851,10 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
     if reduce_only:
         params["reduceOnly"] = True
 
+    # OKX 合约：tdMode 须与账户一致；默认 cross，逐仓用户在 .env 设 OKX_TD_MODE=isolated
+    if _exchange_id(exchange) == "okx" and BINANCE_DEFAULT_TYPE == "future":
+        params["marginMode"] = OKX_TD_MODE
+
     symbol = resolve_symbol(exchange, symbol)
     market_price = _market_price_for_order(exchange, symbol)
 
@@ -1666,10 +1870,22 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             if pos_abs <= 0:
                 raise ValueError("当前无持仓可平")
             cost = None
-            amt = float(pos_abs)
+            amt = _okx_linear_swap_amount_to_base(
+                exchange,
+                symbol,
+                float(pos_abs),
+                payload,
+                from_position_contracts=True,
+            )
         elif amount is not None:
             cost = None
-            amt = float(amount)
+            amt = _okx_linear_swap_amount_to_base(
+                exchange,
+                symbol,
+                float(amount),
+                payload,
+                from_position_contracts=False,
+            )
         else:
             if quote_amount is not None:
                 cost = float(quote_amount)
@@ -1683,26 +1899,109 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             amt = None
         elif amount is not None:
             cost = None
-            amt = float(amount)
+            amt = _okx_linear_swap_amount_to_base(
+                exchange,
+                symbol,
+                float(amount),
+                payload,
+                from_position_contracts=False,
+            )
         else:
             cost = DEFAULT_QUOTE_AMOUNT
             amt = None
 
-    if cost is not None:
-        # 现货/合约均按最新价把 USDT 名义换算成基础币数量（与币安 API 一致）
-        if market_price is not None and market_price > 0:
-            base_amt = cost / market_price
+    try:
+        if cost is not None:
+            # USDT 名义：统一换为标的币数量再市价（OKX 永续的 tgtCcy 仅适用于现货，合约须用基础币数量）
+            if market_price is not None and market_price > 0:
+                base_amt = float(cost) / market_price
+            else:
+                base_amt = quote_to_base_amount(exchange, symbol, float(cost))
+            base_coin = (symbol.split("/")[0] if "/" in symbol else "").strip() or "标的"
+            order_amt = _okx_linear_swap_base_qty_to_contract_amount(
+                exchange, symbol, base_amt
+            )
+            mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+            ct = float(mkt.get("contractSize") or 0) if isinstance(mkt, dict) else 0.0
+            if _exchange_id(exchange) == "okx" and ct > 0:
+                logger.info(
+                    "[下单调试] 市价单: %s %s 标的≈%.8f %s（名义约 %s USDT）→ OKX 张数=%s（每张 %s %s）",
+                    symbol,
+                    action,
+                    base_amt,
+                    base_coin,
+                    cost,
+                    order_amt,
+                    ct,
+                    base_coin,
+                )
+            else:
+                logger.info(
+                    "[下单调试] 市价单: %s %s 标的数量=%.8f %s（名义约 %s USDT）",
+                    symbol,
+                    action,
+                    base_amt,
+                    base_coin,
+                    cost,
+                )
+            order = exchange.create_order(
+                symbol, "market", action, order_amt, market_price, params
+            )
         else:
-            base_amt = quote_to_base_amount(exchange, symbol, cost)
-        order = exchange.create_order(
-            symbol, "market", action, base_amt, market_price, params
-        )
-    else:
-        order = exchange.create_order(
-            symbol, "market", action, amt, market_price, params
-        )
-
-    return order
+            base_coin = (symbol.split("/")[0] if "/" in symbol else "").strip() or "标的"
+            order_amt = _okx_linear_swap_base_qty_to_contract_amount(
+                exchange, symbol, float(amt)
+            )
+            mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+            ct = float(mkt.get("contractSize") or 0) if isinstance(mkt, dict) else 0.0
+            if _exchange_id(exchange) == "okx" and ct > 0:
+                logger.info(
+                    "[下单调试] 市价单: %s %s 标的≈%s %s → OKX 张数=%s（每张 %s %s）",
+                    symbol,
+                    action,
+                    amt,
+                    base_coin,
+                    order_amt,
+                    ct,
+                    base_coin,
+                )
+            else:
+                logger.info(
+                    "[下单调试] 市价单: %s %s 标的数量=%s %s",
+                    symbol,
+                    action,
+                    amt,
+                    base_coin,
+                )
+            order = exchange.create_order(
+                symbol, "market", action, order_amt, market_price, params
+            )
+        
+        logger.info(f"[下单调试] 订单创建成功: {order.get('id', 'N/A')}")
+        return order
+        
+    except Exception as e:
+        logger.error(f"[下单调试] 订单创建失败: {e}")
+        logger.error(f"[下单调试] 交易对: {symbol}")
+        logger.error(f"[下单调试] 动作: {action}")
+        logger.error(f"[下单调试] 成本: {cost}")
+        logger.error(f"[下单调试] 数量: {amt}")
+        logger.error(f"[下单调试] 参数: {params}")
+        logger.error(f"[下单调试] 市场价: {market_price}")
+        logger.error(f"[下单调试] 交易所: {exchange.id}")
+        err_txt = str(e)
+        if _exchange_id(exchange) == "okx" and (
+            "51008" in err_txt or "Insufficient" in err_txt and "margin" in err_txt
+        ):
+            logger.warning(
+                "[OKX 51008 说明] 交易所判定「该 tdMode 下可用 USDT 保证金」不足。"
+                " 常见原因：① USDT 在资金/现货账户，未划入交易账户；② 实际用逐仓但机器人发全仓（在 %s 设 OKX_TD_MODE=isolated 并重启）；"
+                "③ 全仓模式下其它持仓/挂单已占用保证金；④ 下单名义过大。当前 OKX_TD_MODE=%s",
+                _env,
+                OKX_TD_MODE,
+            )
+        # 重新抛出异常，让上层处理
+        raise
 
 
 _BASE = Path(__file__).resolve().parent
@@ -1733,6 +2032,7 @@ def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 "exchange": a.get("exchange") or "binance",
                 "api_key_preview": _mask_api_key((a.get("api_key") or "")),
                 "has_secret": bool((a.get("secret") or "").strip()),
+                "has_password": bool((a.get("password") or "").strip()),
                 "fixed_quote_usdt": a.get("fixed_quote_usdt"),
                 "template_capital_usdt": a.get("template_capital_usdt"),
                 "enabled": a.get("enabled", True),
@@ -1771,10 +2071,12 @@ def api_status():
             "dashboard_viewer_secret_configured": bool(viewer),
             "auth_role": dashboard_auth_role(),
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
-            "template_base_capital_usdt": TEMPLATE_BASE_CAPITAL_USDT,
+            "template_base_capital_usdt": bs["template_base_capital_usdt"],
+            "webhook_sizing_mode": bs["webhook_sizing_mode"],
+            "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
             "stop_loss_enabled": bs["stop_loss_enabled"],
             "stop_loss_pct": bs["stop_loss_pct"],
-            "hint": "多账户：优先模板比例下单（需 .env 设 TEMPLATE_BASE_CAPITAL_USDT 且 TV 提供 contracts，账户需填模板本金）；否则回退账户固定 USDT。",
+            "hint": "Webhook 下单支持两种模式：模板比例/固定USDT，或直接跟随 TradingView 的 amount/quote_amount/contracts。",
         }
     )
 
@@ -1791,8 +2093,16 @@ def api_bot_settings_put():
         cur["stop_loss_enabled"] = bool(body.get("stop_loss_enabled"))
     if "stop_loss_pct" in body and body.get("stop_loss_pct") is not None:
         cur["stop_loss_pct"] = float(body.get("stop_loss_pct"))
+    if "webhook_sizing_mode" in body:
+        cur["webhook_sizing_mode"] = str(body.get("webhook_sizing_mode") or "").strip().lower()
+    if "template_base_capital_usdt" in body and body.get("template_base_capital_usdt") is not None:
+        cur["template_base_capital_usdt"] = float(body.get("template_base_capital_usdt"))
     if cur["stop_loss_pct"] <= 0 or cur["stop_loss_pct"] > 50:
         return jsonify({"ok": False, "error": "止损百分比须在 0～50 之间"}), 400
+    if cur.get("webhook_sizing_mode") not in ("template_or_fixed", "follow_tv"):
+        return jsonify({"ok": False, "error": "下单模式仅支持 template_or_fixed 或 follow_tv"}), 400
+    if float(cur.get("template_base_capital_usdt") or 0) < 0:
+        return jsonify({"ok": False, "error": "模板本金不能小于 0"}), 400
     save_bot_settings(cur)
     return jsonify({"ok": True, **cur})
 
@@ -1815,7 +2125,7 @@ def api_accounts_get():
 
 @app.put("/api/accounts")
 def api_accounts_put():
-    """保存全部交易账户（需控制台密钥）。留空的 api_key/secret 表示保留原值；新行须填写密钥。"""
+    """保存全部交易账户（需控制台密钥）。留空的 api_key/secret/password 表示保留原值；新行须填写必需密钥。"""
     bad = dashboard_auth_response_if_invalid()
     if bad:
         return bad
@@ -1832,11 +2142,15 @@ def api_accounts_put():
             rid = str(uuid.uuid4())
         ak = (row.get("api_key") or "").strip()
         sk = (row.get("secret") or "").strip()
+        pw = (row.get("password") or "").strip()
+        ex_name = (row.get("exchange") or (e.get("exchange") if e else "binance") or "binance").lower()
         if e:
             if not ak:
                 ak = (e.get("api_key") or "").strip()
             if not sk:
                 sk = (e.get("secret") or "").strip()
+            if not pw:
+                pw = (e.get("password") or "").strip()
         else:
             if not ak or not sk:
                 return jsonify(
@@ -1845,6 +2159,13 @@ def api_accounts_put():
                         "error": f"新账户「{row.get('remark') or rid}」须填写 API Key 与 Secret",
                     }
                 ), 400
+        if ex_name == "okx" and not pw:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": f"账户「{row.get('remark') or rid}」使用 OKX 时必须填写 Passphrase",
+                }
+            ), 400
         fq = float(row.get("fixed_quote_usdt") or 0)
         tcap = float(row.get("template_capital_usdt") or 0)
         if fq <= 0 and tcap <= 0:
@@ -1858,22 +2179,22 @@ def api_accounts_put():
             {
                 "id": rid,
                 "remark": ((row.get("remark") or "").strip() or "未命名"),
-                "exchange": (row.get("exchange") or "binance").lower(),
+                "exchange": ex_name,
                 "api_key": ak,
                 "secret": sk,
-                "password": (row.get("password") or "").strip(),
+                "password": pw,
                 "fixed_quote_usdt": fq,
                 "template_capital_usdt": tcap,
                 "enabled": bool(row.get("enabled", True)),
                 "webhook_enabled": bool(row.get("webhook_enabled", True)),
             }
         )
-        if merged[-1]["exchange"] not in ("binance", "hyperliquid"):
+        if merged[-1]["exchange"] not in ("binance", "okx", "hyperliquid"):
             return (
                 jsonify(
                     {
                         "ok": False,
-                        "error": f"账户「{row.get('remark') or rid}」交易所仅支持 binance 或 hyperliquid",
+                        "error": f"账户「{row.get('remark') or rid}」交易所仅支持 binance、okx 或 hyperliquid",
                     }
                 ),
                 400,
@@ -1898,6 +2219,69 @@ def _to_float(x: Any) -> float | None:
         return float(x)
     except (TypeError, ValueError):
         return None
+
+
+def _okx_fetch_balance(exchange, account_type: str) -> dict[str, Any]:
+    try:
+        if account_type == "spot":
+            raw = exchange.privateGetAssetBalances({})
+            data = raw.get("data") if isinstance(raw, dict) else None
+            rows = data if isinstance(data, list) else []
+            out: dict[str, Any] = {"info": rows, "free": {}, "used": {}, "total": {}}
+            for row in rows:
+                ccy = str(row.get("ccy") or "").upper()
+                if not ccy:
+                    continue
+                avail = _to_float(row.get("availBal") or row.get("availEq"))
+                bal = _to_float(row.get("bal") or row.get("eq"))
+                frozen = _to_float(row.get("frozenBal"))
+                out[ccy] = {
+                    "free": avail,
+                    "used": frozen,
+                    "total": bal,
+                }
+                if avail is not None:
+                    out["free"][ccy] = avail
+                if frozen is not None:
+                    out["used"][ccy] = frozen
+                if bal is not None:
+                    out["total"][ccy] = bal
+            return out
+
+        raw = exchange.privateGetAccountBalance({})
+        data = raw.get("data") if isinstance(raw, dict) else None
+        rows = data if isinstance(data, list) else []
+        details: list[dict[str, Any]] = []
+        if rows:
+            first = rows[0]
+            details = first.get("details") if isinstance(first, dict) else []
+            if not isinstance(details, list):
+                details = []
+        out: dict[str, Any] = {"info": {"details": details}, "free": {}, "used": {}, "total": {}}
+        for row in details:
+            ccy = str(row.get("ccy") or "").upper()
+            if not ccy:
+                continue
+            avail = _to_float(row.get("availBal") or row.get("availEq"))
+            eq = _to_float(row.get("eq") or row.get("cashBal") or row.get("bal"))
+            frozen = None
+            if avail is not None and eq is not None:
+                frozen = max(eq - avail, 0.0)
+            out[ccy] = {
+                "free": avail,
+                "used": frozen,
+                "total": eq,
+            }
+            if avail is not None:
+                out["free"][ccy] = avail
+            if frozen is not None:
+                out["used"][ccy] = frozen
+            if eq is not None:
+                out["total"][ccy] = eq
+        return out
+    except Exception as e:
+        logger.exception("OKX 查询余额失败，账户类型: %s", account_type)
+        raise ValueError(f"OKX 查询余额失败: {e}") from e
 
 
 def normalize_usdt_balance(bal: dict[str, Any]) -> dict[str, Any]:
@@ -2042,27 +2426,37 @@ def api_balance():
                 usdt_future: dict[str, Any] = {}
                 usdt_spot: dict[str, Any] = {}
                 try:
-                    fut_type = "swap" if ex_id == "hyperliquid" else "future"
-                    fut_params: dict[str, Any] = {"type": fut_type}
-                    if ex_id == "hyperliquid":
-                        fut_params["user"] = str(a.get("api_key") or "")
-                    usdt_future = normalize_usdt_balance(
-                        ex.fetch_balance(fut_params)
-                    )
+                    fut_type = "swap" if ex_id in ("hyperliquid", "okx") else "future"
+                    if ex_id == "okx":
+                        usdt_future = normalize_usdt_balance(
+                            _okx_fetch_balance(ex, fut_type)
+                        )
+                    else:
+                        fut_params: dict[str, Any] = {"type": fut_type}
+                        if ex_id == "hyperliquid":
+                            fut_params["user"] = str(a.get("api_key") or "")
+                        usdt_future = normalize_usdt_balance(
+                            ex.fetch_balance(fut_params)
+                        )
                 except Exception as e:
                     logger.warning("查询合约余额失败: %s", e)
                     usdt_future = {"error": str(e), "source": "future_error"}
                 try:
-                    spot_params: dict[str, Any] = {"type": "spot"}
-                    if ex_id == "hyperliquid":
-                        spot_params["user"] = str(a.get("api_key") or "")
-                    usdt_spot = normalize_spot_usdt(
-                        ex.fetch_balance(spot_params)
-                    )
+                    if ex_id == "okx":
+                        usdt_spot = normalize_spot_usdt(
+                            _okx_fetch_balance(ex, "spot")
+                        )
+                    else:
+                        spot_params: dict[str, Any] = {"type": "spot"}
+                        if ex_id == "hyperliquid":
+                            spot_params["user"] = str(a.get("api_key") or "")
+                        usdt_spot = normalize_spot_usdt(
+                            ex.fetch_balance(spot_params)
+                        )
                 except Exception as e:
                     logger.warning("查询现货余额失败: %s", e)
                     usdt_spot = {"error": str(e), "source": "spot_error"}
-                if ex_id == "hyperliquid":
+                if ex_id in ("hyperliquid", "okx"):
                     fut_total = _to_float(usdt_future.get("total")) or 0.0
                     spot_total = _to_float(usdt_spot.get("total")) or 0.0
                     if fut_total > 0 and fut_total >= spot_total:
@@ -2100,7 +2494,7 @@ def api_balance():
             "usdt": first.get("usdt") if first else None,
             "usdt_future": first.get("usdt_future") if first else None,
             "usdt_spot": first.get("usdt_spot") if first else None,
-            "hint": "多账户：默认展示第一个账户摘要；完整结果见 accounts 数组。合约与现货资金池分开，需在币安划转。",
+            "hint": "多账户：默认展示第一个账户摘要；完整结果见 accounts 数组。Binance/OKX/Hyperliquid 的合约与现货资金池可能分开显示。",
             "cache": {"hit": False, "ttl_sec": ttl, "key": cache_key},
         }
         if ttl > 0:
@@ -2139,6 +2533,7 @@ def api_order():
         ex = get_exchange_for_account(a, purpose="trade")
         account_trade_lock = _get_account_trade_lock(str(a["id"]))
         sizing_mode = None
+        op: dict[str, Any] | None = None
         if use_base_amount:
             t_exec_start = time.time()
             with account_trade_lock:
@@ -2156,6 +2551,12 @@ def api_order():
             sizing_mode = op.get("_sizing_mode")
             payload["_resolved_reduce_only"] = op.get("_resolved_reduce_only")
             payload["reduce_only"] = op.get("_resolved_reduce_only")
+        manual_quote_usdt: float | None = None
+        if not use_base_amount and op is not None:
+            if op.get("quote_amount") is not None:
+                manual_quote_usdt = _to_float(op.get("quote_amount"))
+            elif op.get("_sizing_mode") == "fixed_quote":
+                manual_quote_usdt = _to_float(a.get("fixed_quote_usdt"))
         ex_raw = order.get("timestamp") or order.get("lastUpdateTimestamp")
         ex_ms = None
         if ex_raw is not None:
@@ -2196,7 +2597,7 @@ def api_order():
             side=side_v,
             reduce_only=ro,
             action=_service_action_label(ro, side_v),
-            quote_usdt=float(a.get("fixed_quote_usdt") or 0) if not use_base_amount else None,
+            quote_usdt=manual_quote_usdt,
             order_id=str(order.get("id") or ""),
             error=None,
             exchange_timestamp_ms=ex_ms,
@@ -2214,7 +2615,9 @@ def api_order():
                 "order": order,
                 "account_id": a["id"],
                 "remark": a.get("remark"),
-                "used_quote_usdt": None if use_base_amount else a.get("fixed_quote_usdt"),
+                "used_quote_usdt": None
+                if use_base_amount
+                else (op.get("quote_amount") if op and op.get("quote_amount") is not None else None),
                 "sizing_mode": sizing_mode,
                 "stop_loss_order": sl_order,
                 "stop_loss_error": sl_err,
