@@ -569,7 +569,8 @@
     <nav class="tabs" role="tablist" aria-label="主菜单">
       <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
       <button type="button" class="tab-btn" data-tab="accounts" role="tab" aria-selected="false">交易账户</button>
-      <button type="button" class="tab-btn" data-tab="balance" role="tab" aria-selected="false">余额与试单</button>
+      <button type="button" class="tab-btn" data-tab="trailing" role="tab" aria-selected="false">移动止盈</button>
+      <button type="button" class="tab-btn" data-tab="balance" role="tab" aria-selected="false">余额</button>
       <button type="button" class="tab-btn" data-tab="logs" role="tab" aria-selected="false">运行日志</button>
       <button type="button" class="tab-btn" data-tab="trades" role="tab" aria-selected="false">交易记录</button>
       <button type="button" class="tab-btn" data-tab="tv" role="tab" aria-selected="false">TradingView</button>
@@ -598,18 +599,9 @@
       <div class="settings-section">
         <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
           TradingView Webhook 跟单
-          <span class="help-tip" id="webhookSectionTip" tabindex="0" data-tip="这里选「跟随模板下单」还是「跟随TV策略下单」，决定机器人怎么把 TV 发来的 JSON 换成真实下单量。点「下单模式」旁问号可看大白话说明。">?</span>
+          <span class="help-tip" id="webhookSectionTip" tabindex="0" data-tip="「下单模式」与「仅处理开仓」已移至顶部「TradingView」页的「告警模板助手」，与一键生成模板放在一起，避免两处填写不一致。">?</span>
         </div>
-        <div class="field-stack">
-          <label for="webhookSizingMode" class="label-with-tip">
-            <span class="label-text">下单模式</span>
-            <span class="help-tip" id="webhookSizingModeTip" tabindex="0" data-tip="">?</span>
-          </label>
-          <select id="webhookSizingMode">
-            <option value="template_or_fixed">跟随模板下单</option>
-            <option value="follow_tv">跟随TV策略下单</option>
-          </select>
-        </div>
+        <p class="hint" style="margin-top: 0.35rem; font-size: 0.82rem;">请打开 <strong>TradingView</strong> 标签 →「告警模板助手」配置跟单模式、仅开仓与一键生成 JSON。</p>
         <div class="field-stack" id="templateBaseWrap" style="margin-top: 0.75rem;">
           <label for="templateBaseCapitalUsdt" class="label-with-tip">
             <span class="label-text">全局模板本金（USDT）</span>
@@ -660,6 +652,95 @@
     </div>
     </div>
 
+    <div id="panel-trailing" class="tab-panel" role="tabpanel">
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2 class="title-line">移动止盈 <span class="help-tip" tabindex="0" data-tip="币安 U 本位或 OKX 永续 SWAP（.env 中 BINANCE_DEFAULT_TYPE=future）。后台按浮盈分档监控；追踪模式在交易所挂条件单，否则触发后轮询市价/限价 IOC 平仓。与 Webhook 共用账户锁。">?</span></h2>
+      <p class="hint" id="trailingHintTop">请在「概览」保存访问密钥后使用本页。</p>
+      <label for="accountSelectTrailing">交易账户（币安 / OKX）</label>
+      <select id="accountSelectTrailing"></select>
+      <div id="trailingRunStat" class="stat" style="margin-top: 0.75rem; white-space: pre-wrap; word-break: break-word;">—</div>
+    </div>
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2 class="title-line">参数</h2>
+      <div class="row" style="margin-top: 0.35rem;">
+        <div>
+          <label for="trailingPriceSource">浮盈计价</label>
+          <select id="trailingPriceSource">
+            <option value="mark">标记价（推荐）</option>
+            <option value="last" selected>最新价（更敏感，每仓多一次 ticker）</option>
+          </select>
+        </div>
+        <div>
+          <label for="trailingMonitorInterval">有持仓时监控间隔（秒）</label>
+          <input type="number" id="trailingMonitorInterval" min="1" max="120" step="1" value="1" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingIdleNoPosition">无持仓时轮询间隔（秒）</label>
+          <input type="number" id="trailingIdleNoPosition" min="5" max="120" step="1" value="10" />
+        </div>
+        <div>
+          <label for="trailingStopLossPct">止损 %（相对开仓亏损）</label>
+          <input type="number" id="trailingStopLossPct" min="0.01" step="0.01" value="50" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingTakeProfitMode">止盈 / 平仓</label>
+          <select id="trailingTakeProfitMode">
+            <option value="market">市价（触发后轮询平仓）</option>
+            <option value="track" selected>条件限价追踪（币安 CONDITIONAL STOP / OKX trigger+limit，按有仓间隔撤挂）</option>
+          </select>
+        </div>
+        <div>
+          <label for="trailingTrackLimitOffsetBps">触发→委托价差（基点）</label>
+          <input type="number" id="trailingTrackLimitOffsetBps" min="0" max="500" step="1" value="25" title="多头平多：限价≈触发价×(1−基点/10000)再至少下移 2 个 tick；波动大或标记价触发时建议≥20 基点，过小易「已触发但不成交」。" />
+        </div>
+      </div>
+      <p class="hint" style="margin-top: 0.35rem;">「条件限价追踪」：触发后挂的是被动限价；若限价仍高于市价（多头卖出），会长时间不成交——请加大「触发→委托价差」或改用条件市价。程序已保证限价相对触发价至少偏离 2 个价格 tick。止损%、以及旧任务缺 exchange_algo_type 时曾误走 STOP_MARKET；选限价后请停止再启动一次任务。旧接口「限价 IOC」未成交时会补市价。</p>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingLowTrailProfit">低档盈利阈值 %</label>
+          <input type="number" id="trailingLowTrailProfit" min="0" step="0.1" value="0.9" />
+        </div>
+        <div>
+          <label for="trailingLowTrailStop">低档保护回撤线 %（底线）</label>
+          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" title="进入低档后，实际平仓/挂单阈值=max(本底线%, 最高浮盈×(1−第一档回撤比例))，会随最高浮盈上移；再与当前浮盈取 min 以免触发价越过市价。" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingFirstTrailProfit">第一档移动止盈阈值 %</label>
+          <input type="number" id="trailingFirstTrailProfit" min="0" step="0.1" value="1" />
+        </div>
+        <div>
+          <label for="trailingTrailStopLossPct">第一档回撤比例（0～1）</label>
+          <input type="number" id="trailingTrailStopLossPct" min="0.01" max="1" step="0.01" value="0.2" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingSecondTrailProfit">第二档移动止盈阈值 %</label>
+          <input type="number" id="trailingSecondTrailProfit" min="0" step="0.1" value="1.5" />
+        </div>
+        <div>
+          <label for="trailingHigherTrailStopPct">第二档回撤比例（0～1）</label>
+          <input type="number" id="trailingHigherTrailStopPct" min="0.01" max="1" step="0.01" value="0.3" />
+        </div>
+      </div>
+      <label for="trailingFeishuWebhook" style="margin-top: 0.75rem;">飞书 Webhook（可选）</label>
+      <input id="trailingFeishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+      <label for="trailingBlacklist" style="margin-top: 0.65rem;">黑名单（可选，逗号或换行分隔）</label>
+      <textarea id="trailingBlacklist" rows="2" placeholder="如 BTCUSDT"></textarea>
+      <div class="row" style="margin-top: 0.75rem;">
+        <button type="button" id="btnTrailingStart" disabled>启动移动止盈</button>
+        <button type="button" class="secondary" id="btnTrailingStop" disabled>停止</button>
+      </div>
+      <p id="trailingFormHint" class="hint" style="margin-top: 0.5rem;"></p>
+    </div>
+    </div>
+
     <div id="panel-balance" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
       <h2 class="title-line">稳定币余额 <span class="help-tip" tabindex="0" data-tip="可查看全部账户或单账户余额。Binance 常见 USDT，Hyperliquid 常见 USDC。进入本页或切换账户会自动刷新。">?</span></h2>
@@ -680,56 +761,6 @@
       <div id="outBalance" class="out" style="display: none;"></div>
     </div>
 
-    <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">手动测试下单 <span class="help-tip" tabindex="0" data-tip="用于小额联调。建议先测试网或最小仓位。按固定 USDT 时，会读取该账户在交易账户里的固定 USDT 设置。">?</span></h2>
-      <div class="row">
-        <div>
-          <label for="accountSelectOrder">交易账户</label>
-          <select id="accountSelectOrder"></select>
-        </div>
-        <div>
-          <label for="sym">交易对 symbol</label>
-          <input id="sym" value="BTCUSDT" placeholder="如 BTCUSDT" />
-        </div>
-        <div>
-          <label for="side">方向</label>
-          <select id="side">
-            <option value="buy">buy</option>
-            <option value="sell">sell</option>
-          </select>
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="mode">数量方式</label>
-          <select id="mode">
-            <option value="quote">按账户固定 USDT 名义</option>
-            <option value="amount">按基础币数量 (amount)</option>
-          </select>
-        </div>
-        <div>
-          <label for="qty">基础币数量（仅选 amount 时有效）</label>
-          <input id="qty" type="text" value="20" />
-        </div>
-        <div>
-          <label for="reduce">合约仅减仓</label>
-          <select id="reduce">
-            <option value="no">否</option>
-            <option value="yes">是 (reduce_only)</option>
-          </select>
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.75rem;">
-        <button type="button" id="btnOrder" disabled>发送市价单（真实下单）</button>
-      </div>
-      <p class="hint">详细说明请鼠标悬浮标题后的 <strong>?</strong>。</p>
-      <div id="orderPlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
-      <p style="margin: 0.5rem 0 0; display: none;" id="orderToggleWrap">
-        <button type="button" class="btn-link" id="btnToggleOrderRaw">显示完整返回</button>
-      </p>
-      <p class="balance-raw-title" id="orderRawTitle" style="display: none;">完整 JSON</p>
-      <div id="outOrder" class="out" style="display: none;"></div>
-    </div>
     </div>
 
     <div id="panel-logs" class="tab-panel" role="tabpanel">
@@ -878,7 +909,46 @@
 
     <div id="panel-tv" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">TradingView 与模拟 Webhook <span class="help-tip" tabindex="0" data-tip="告警 URL 填 你的网站/webhook，请求头 X-TV-Secret 要和 .env 里一致。下面「发送模拟 Webhook」会真的去下单，先小金额试。消息里如果写了 quote_amount，会优先按「花多少 U」去下；没写时，若机器人是「跟随模板下单」，各账户还走自己设的固定 USDT。">?</span></h2>
+      <h2 class="title-line">TradingView 与模拟 Webhook <span class="help-tip" tabindex="0" data-tip="告警 URL 填 你的网站/webhook，请求头 X-TV-Secret 要和 .env 里一致。消息体可带 account_id：只给该账户下单；不带 account_id 则等同「全部账户跟单」，所有已勾选 Webhook 的账户都会执行。下面「发送模拟 Webhook」会真的去下单，先小金额试。">?</span></h2>
+
+      <div class="settings-section" style="margin-top: 0.75rem; padding: 0.85rem; border: 1px solid var(--border); border-radius: 10px; background: var(--elevated);">
+        <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
+          告警模板助手
+          <span class="help-tip" tabindex="0" data-tip="先选「本报警使用的账户」，再选下单模式，点「一键生成」在 JSON 顶部插入 account_id。机器人收到后只对该账户下单。选「全部账户跟单」时 JSON 不写 account_id，所有已勾选 Webhook 的账户都会执行这条信号。">?</span>
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+            <label for="tvWebhookAccountSelect">本报警使用的账户</label>
+            <select id="tvWebhookAccountSelect">
+              <option value="">全部账户跟单（不指定某一账户）</option>
+            </select>
+            <p class="hint" style="margin-top: 0.35rem; font-size: 0.78rem;">选具体账户时，「一键生成」会自动在 JSON 里写入 <code>account_id</code>（你不必手抄长 id）。选「全部账户跟单」时不会写 <code>account_id</code>，所有已在「交易账户」里勾选 Webhook 且配好金额的账户都会各下一笔。</p>
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+            <label for="webhookSizingMode" class="label-with-tip">
+              <span class="label-text">下单模式</span>
+              <span class="help-tip" id="webhookSizingModeTip" tabindex="0" data-tip="">?</span>
+            </label>
+            <select id="webhookSizingMode">
+              <option value="template_or_fixed">跟随模板下单</option>
+              <option value="follow_tv">跟随TV策略下单</option>
+            </select>
+        </div>
+        <div class="field-stack" id="webhookOpenOnlyWrap" style="margin-top: 0.65rem; display: none;">
+          <label class="sl-check" style="display:flex;align-items:flex-start;gap:0.45rem;cursor:pointer;">
+            <input type="checkbox" id="webhookOpenOnly" />
+            <span>仅开仓，止盈用移动止盈（忽略 TV 发来的减仓/平仓类 Webhook）</span>
+          </label>
+          <span class="help-tip" tabindex="0" data-tip="仅在「跟随TV策略下单」时可选。开启后 reduce_only 的 buy/sell 直接 skipped。须在「移动止盈」页为所选交易所账户启动任务。" style="margin-top:0.35rem;">?</span>
+        </div>
+        <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
+          <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
+          <button type="button" class="secondary" id="btnTvWizardSaveFollow">保存跟单模式到服务器</button>
+          <button type="button" class="secondary" id="btnTvWizardCopyOutput">复制生成内容</button>
+        </div>
+        <label for="tvWizardOutput" style="margin-top: 0.75rem; display:block;">生成结果（仅 JSON，可粘到 TV 告警消息）</label>
+        <textarea id="tvWizardOutput" style="min-height: 220px; font-size: 0.78rem; margin-top: 0.35rem;" placeholder="选账户（可选）、选下单模式后点「一键生成」…"></textarea>
+      </div>
+
       <p class="hint" style="margin-top: 0;">告警 URL：<code id="webhookHint">https://你的域名/webhook</code></p>
       <label for="webhookTestBody">消息体 JSON</label>
       <textarea id="webhookTestBody" style="min-height: 88px;">{"action":"buy","symbol":"ETHUSDT","quote_amount":1000}</textarea>
@@ -887,44 +957,7 @@
       </div>
       <div id="webhookTestPlain" class="balance-plain" style="display: none; margin-top: 0.75rem;"></div>
       <div id="outWebhookTest" class="out" style="display: none; margin-top: 0.5rem;"></div>
-      <div class="tv-snippet-head">
-        <p class="balance-raw-title">跟随模板下单</p>
-        <span class="help-tip" tabindex="0" data-tip="大白话：先在「机器人设置」里选「跟随模板下单」，再给每个交易账户填「模板本金」。下面这段 JSON 让 TV 把策略张数放在 contracts；机器人按「TV 张数 ×（该账户模板本金 ÷ 上面的全局模板本金）」去各账户下单。没带张数或算不了时，就用该账户里设的固定 USDT 兜底。">?</span>
-      </div>
-      <div class="copy-row">
-        <textarea id="tplTvTemplateCapitalWebhook" readonly style="min-height: 150px; font-size: 0.78rem;">{
-  "ticker": "{{ticker}}",
-  "action": "{{strategy.order.action}}",
-  "symbol": "{{ticker}}",
-  "prev_market_position": "{{strategy.prev_market_position}}",
-  "market_position": "{{strategy.market_position}}",
-  "position_size": "{{strategy.position_size}}",
-  "contracts": "{{strategy.order.contracts}}"
-}</textarea>
-      </div>
-      <div class="row" style="margin-top: 0.5rem;">
-        <button type="button" class="secondary" id="btnCopyTvTemplateCapitalWebhook">复制「跟随模板下单」JSON</button>
-      </div>
 
-      <div class="tv-snippet-head">
-        <p class="balance-raw-title">跟随TV策略下单</p>
-        <span class="help-tip" tabindex="0" data-tip="大白话：先在「机器人设置」里选「跟随TV策略下单」。机器人看数的顺序：先看 quote_amount（只表示要花多少 U），没有再看 amount（多少币），最后看 contracts（多少张）。别把张数写进 quote_amount，不然会当成要花那么多 U（比如写 94 就约等于下 94U）；要按张、按币就只用 amount 和 contracts。">?</span>
-      </div>
-      <div class="copy-row">
-        <textarea id="tplTvFollowAmountWebhook" readonly style="min-height: 170px; font-size: 0.78rem;">{
-  "ticker": "{{ticker}}",
-  "action": "{{strategy.order.action}}",
-  "symbol": "{{ticker}}",
-  "amount": "{{strategy.order.contracts}}",
-  "prev_market_position": "{{strategy.prev_market_position}}",
-  "market_position": "{{strategy.market_position}}",
-  "position_size": "{{strategy.position_size}}",
-  "contracts": "{{strategy.order.contracts}}"
-}</textarea>
-      </div>
-      <div class="row" style="margin-top: 0.5rem;">
-        <button type="button" class="secondary" id="btnCopyTvFollowAmountWebhook">复制「跟随TV策略下单」JSON</button>
-      </div>
     </div>
     </div>
 
@@ -935,7 +968,6 @@
     const secretEl = document.getElementById("secret");
     const statusBox = document.getElementById("statusBox");
     const btnBalance = document.getElementById("btnBalance");
-    const btnOrder = document.getElementById("btnOrder");
     const btnWebhookTest = document.getElementById("btnWebhookTest");
     const btnAccountLog = document.getElementById("btnAccountLog");
     const btnTradeServiceRefresh = document.getElementById("btnTradeServiceRefresh");
@@ -953,6 +985,7 @@
     const accountsHint = document.getElementById("accountsHint");
     let accountsState = [];
     let dashboardRole = null; // admin | viewer | null
+    let trailingPollTimer = null;
     /** 交易记录表格估算手续费：名义×费率（与 .env DISPLAY_EST_FEE_RATE 同步，默认 0.0005） */
     let displayEstFeeRate = 0.0005;
     const outBalance = document.getElementById("outBalance");
@@ -960,13 +993,28 @@
     const balanceRawTitle = document.getElementById("balanceRawTitle");
     const balanceToggleWrap = document.getElementById("balanceToggleWrap");
     const btnToggleRawJson = document.getElementById("btnToggleRawJson");
-    const outOrder = document.getElementById("outOrder");
-    const orderPlain = document.getElementById("orderPlain");
-    const orderToggleWrap = document.getElementById("orderToggleWrap");
-    const orderRawTitle = document.getElementById("orderRawTitle");
-    const btnToggleOrderRaw = document.getElementById("btnToggleOrderRaw");
     let balanceRawVisible = false;
-    let orderRawVisible = false;
+
+    /** TradingView 告警 JSON 骨架（与旧版只读模板一致，供一键生成） */
+    const TV_TPL_WEBHOOK_TEMPLATE_CAPITAL = `{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "symbol": "{{ticker}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "market_position": "{{strategy.market_position}}",
+  "position_size": "{{strategy.position_size}}",
+  "contracts": "{{strategy.order.contracts}}"
+}`;
+    const TV_TPL_WEBHOOK_FOLLOW_TV = `{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "symbol": "{{ticker}}",
+  "amount": "{{strategy.order.contracts}}",
+  "prev_market_position": "{{strategy.prev_market_position}}",
+  "market_position": "{{strategy.market_position}}",
+  "position_size": "{{strategy.position_size}}",
+  "contracts": "{{strategy.order.contracts}}"
+}`;
 
     function fmtU(n) {
       if (n === null || n === undefined || typeof n === "object") return "—";
@@ -1573,40 +1621,6 @@
       }
     }
 
-    function setOrderRawVisible(show) {
-      orderRawVisible = show;
-      if (orderRawTitle) orderRawTitle.style.display = show ? "block" : "none";
-      if (outOrder) outOrder.style.display = show ? "block" : "none";
-      if (btnToggleOrderRaw) {
-        btnToggleOrderRaw.textContent = show ? "隐藏完整返回" : "显示完整返回";
-      }
-    }
-
-    function renderOrderSummary(d) {
-      if (!orderPlain) return;
-      if (!d || !d.ok || !d.order) {
-        orderPlain.style.display = "none";
-        if (orderToggleWrap) orderToggleWrap.style.display = "none";
-        return;
-      }
-      const o = d.order;
-      const sym = o.symbol || "—";
-      const side = o.side || "—";
-      const st = o.status || "—";
-      const avg = o.average != null ? o.average : "—";
-      const filled = o.filled != null ? o.filled : o.amount;
-      let cost = o.cost;
-      if (cost == null && o.info && o.info.cumQuote != null) cost = o.info.cumQuote;
-      const oid = o.id || (o.info && o.info.orderId) || "—";
-      orderPlain.innerHTML =
-        `<div class="row-line"><strong style="color:var(--ok)">下单成功</strong>${d.remark ? " · 账户 " + escHtml(String(d.remark)) : ""}</div>` +
-        `<div class="row-line">${sym} · ${side} · ${st}</div>` +
-        `<div class="row-line">成交量 <span class="num">${filled}</span> &nbsp; 均价 <span class="num">${avg}</span> &nbsp; 成交额约 <span class="num">${cost != null ? cost : "—"}</span> USDT</div>` +
-        `<div class="row-line hint" style="margin-top:0.5rem;">订单号 <code style="font-size:0.8rem">${oid}</code></div>`;
-      orderPlain.style.display = "block";
-      if (orderToggleWrap) orderToggleWrap.style.display = "block";
-    }
-
     function loadSecret() {
       const s = localStorage.getItem(KEY) || "";
       secretEl.value = s;
@@ -1644,7 +1658,6 @@
     function updateButtons() {
       const ok = getSecret().length > 0;
       btnBalance.disabled = !ok;
-      btnOrder.disabled = !ok || !isAdminRole();
       if (btnWebhookTest) btnWebhookTest.disabled = !ok || !isAdminRole();
       if (btnAccountLog) btnAccountLog.disabled = !ok;
       if (btnTradeServiceRefresh) btnTradeServiceRefresh.disabled = !ok;
@@ -1665,6 +1678,10 @@
       if (btnReloadAccounts) btnReloadAccounts.disabled = !ok;
       const btnSaveBot = document.getElementById("btnSaveBotSettings");
       if (btnSaveBot) btnSaveBot.disabled = !ok || !isAdminRole();
+      const bTrStart = document.getElementById("btnTrailingStart");
+      const bTrStop = document.getElementById("btnTrailingStop");
+      if (bTrStart) bTrStart.disabled = !ok || !isAdminRole();
+      if (bTrStop) bTrStop.disabled = !ok || !isAdminRole();
       const stopLossEnabled = document.getElementById("stopLossEnabled");
       const stopLossPct = document.getElementById("stopLossPct");
       if (stopLossEnabled) stopLossEnabled.disabled = !ok || !isAdminRole();
@@ -1682,7 +1699,6 @@
 
     function populateAccountSelects() {
       const balSel = document.getElementById("accountSelectBalance");
-      const ordSel = document.getElementById("accountSelectOrder");
       const logSel = document.getElementById("accountLogFilter");
       const opts = accountsState
         .filter((a) => a.id)
@@ -1693,10 +1709,6 @@
         .join("");
       if (balSel) {
         balSel.innerHTML = `<option value="">全部账户</option>` + opts;
-      }
-      if (ordSel) {
-        ordSel.innerHTML =
-          opts || `<option value="">请先添加并保存账户</option>`;
       }
       if (logSel) {
         const cur = logSel.value;
@@ -1711,6 +1723,51 @@
         tradeSvcSel.innerHTML = `<option value="">全部</option>` + opts;
         if (cur && [...tradeSvcSel.options].some((o) => o.value === cur)) {
           tradeSvcSel.value = cur;
+        }
+      }
+      const tOpts =
+        accountsState
+          .filter((a) => {
+            const ex = (a.exchange || "binance").toLowerCase();
+            return a.id && (ex === "binance" || ex === "okx");
+          })
+          .map((a) => {
+            const vid = String(a.id).replace(/"/g, "&quot;");
+            return `<option value="${vid}">${escHtml(a.remark || a.id)}</option>`;
+          })
+          .join("");
+      const trailSel = document.getElementById("accountSelectTrailing");
+      if (trailSel) {
+        const curT = trailSel.value;
+        trailSel.innerHTML = tOpts || `<option value="">无币安/OKX 账户</option>`;
+        if (curT && [...trailSel.options].some((o) => o.value === curT)) {
+          trailSel.value = curT;
+        }
+      }
+      const tvWhAcc = document.getElementById("tvWebhookAccountSelect");
+      if (tvWhAcc) {
+        const curW = tvWhAcc.value;
+        const whOpts = accountsState
+          .filter((a) => {
+            if (!a.id || a.enabled === false || a.webhook_enabled === false) return false;
+            const fq = Number(a.fixed_quote_usdt) || 0;
+            const tc = Number(a.template_capital_usdt) || 0;
+            return fq > 0 || tc > 0;
+          })
+          .map((a) => {
+            const vid = String(a.id).replace(/"/g, "&quot;");
+            const exn = (a.exchange || "binance").toLowerCase();
+            const exLabel =
+              exn === "okx" ? "OKX" : exn === "hyperliquid" ? "HL" : "币安";
+            const name = (a.remark && String(a.remark).trim()) || "未命名";
+            const lab = `${escHtml(name)} · ${exLabel}`;
+            return `<option value="${vid}">${lab}</option>`;
+          })
+          .join("");
+        tvWhAcc.innerHTML =
+          `<option value="">全部账户跟单（不指定某一账户）</option>` + (whOpts || "");
+        if (curW && [...tvWhAcc.options].some((o) => o.value === curW)) {
+          tvWhAcc.value = curW;
         }
       }
       updateButtons();
@@ -1976,9 +2033,16 @@
       }
     }
 
+    function updateWebhookOpenOnlyWrapVisibility() {
+      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      const wrap = document.getElementById("webhookOpenOnlyWrap");
+      if (wrap) wrap.style.display = mode === "follow_tv" ? "" : "none";
+    }
+
     function updateWebhookSettingsPanel() {
       updateWebhookSizingHint();
       updateTemplateBaseFieldHint();
+      updateWebhookOpenOnlyWrapVisibility();
     }
 
     async function fetchStatus() {
@@ -2017,6 +2081,10 @@
           d.webhook_sizing_mode === "follow_tv"
             ? "跟随TV策略下单"
             : "跟随模板下单";
+        const openOnlyLine =
+          d.webhook_sizing_mode === "follow_tv" && d.webhook_open_only
+            ? `<br/><span>Webhook 平仓/减仓</span> <span class="pill on">已忽略（仅开仓）</span>`
+            : "";
         const ac = typeof d.accounts_count === "number" ? d.accounts_count : "—";
         const estFeePct =
           (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0
@@ -2025,6 +2093,26 @@
         const envLine = d.env_path
           ? `<br/><span style="font-size:0.75rem;color:var(--muted)">配置路径 ${d.env_file_exists ? "✓" : "✗"}</span> <code style="font-size:0.7rem">${d.env_path}</code>`
           : "";
+        const tsList = Array.isArray(d.trailing_stop_tasks) ? d.trailing_stop_tasks : [];
+        const tsRunning = tsList.filter((x) => x && x.running);
+        let trailingLine = "";
+        if (tsRunning.length) {
+          const names = tsRunning.map((x) => {
+            const r = x.remark != null && String(x.remark).trim() ? String(x.remark).trim() : String(x.account_id || "");
+            return escHtml(r);
+          });
+          trailingLine =
+            `<br/><span>移动止盈运行中</span> <span class="pill on">${tsRunning.length} 个账户</span> ` +
+            names.join("、");
+        } else if (tsList.length) {
+          trailingLine =
+            `<br/><span>移动止盈</span> <span class="pill off">当前无运行中</span> ` +
+            `<span style="font-size:0.75rem;color:var(--muted)">（本进程内 ${tsList.length} 个账户曾有任务，已停止）</span>`;
+        } else {
+          trailingLine =
+            `<br/><span>移动止盈</span> <span class="pill off">本进程未启动</span> ` +
+            `<span style="font-size:0.75rem;color:var(--muted)">（在「移动止盈」页启动后此处显示账户名）</span>`;
+        }
         statusBox.innerHTML =
           `${net} 模式：<strong>${d.binance_type}</strong><br/>` +
           `<span>当前权限</span> ${rolePill}<br/>` +
@@ -2032,7 +2120,8 @@
           `<span>已配置 API 的账户</span> ${api}<br/>` +
           `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
           `<span>TV Webhook 密钥</span> ${wh}<br/>` +
-          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}<br/>` +
+          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}${openOnlyLine}<br/>` +
+          `${trailingLine}<br/>` +
           `<span>全局模板本金</span> ${Number(d.template_base_capital_usdt) || 0} USDT<br/>` +
           `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}<br/>` +
           `<span>交易记录估算手续费率</span> ${estFeePct.toFixed(4)}% <span style="font-size:0.75rem;color:var(--muted)">（.env DISPLAY_EST_FEE_RATE）</span>` +
@@ -2052,7 +2141,6 @@
         const sizingModeEl = document.getElementById("webhookSizingMode");
         if (sizingModeEl && d.webhook_sizing_mode) {
           sizingModeEl.value = String(d.webhook_sizing_mode);
-          updateWebhookSettingsPanel();
         }
         const templateBaseEl = document.getElementById("templateBaseCapitalUsdt");
         if (
@@ -2062,6 +2150,11 @@
         ) {
           templateBaseEl.value = String(d.template_base_capital_usdt);
         }
+        const woo = document.getElementById("webhookOpenOnly");
+        if (woo && typeof d.webhook_open_only === "boolean") {
+          woo.checked = d.webhook_open_only;
+        }
+        updateWebhookSettingsPanel();
       } catch (e) {
         dashboardRole = null;
         updateButtons();
@@ -2098,6 +2191,7 @@
             stop_loss_pct: pct,
             webhook_sizing_mode: sizingMode,
             template_base_capital_usdt: templateBase,
+            webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
           }),
         });
         const t = await r.text();
@@ -2164,98 +2258,6 @@
       }
     }
 
-    async function doOrder() {
-      if (!ensureAdminAction()) return;
-      if (orderPlain) orderPlain.style.display = "none";
-      if (orderToggleWrap) orderToggleWrap.style.display = "none";
-      if (orderRawTitle) orderRawTitle.style.display = "none";
-      setOrderRawVisible(false);
-      if (outOrder) {
-        outOrder.style.display = "block";
-        outOrder.className = "out";
-        outOrder.textContent = "请求中…";
-      }
-      const accountId = document.getElementById("accountSelectOrder")?.value || "";
-      if (!accountId) {
-        alert("请选择交易账户");
-        return;
-      }
-      const sym = document.getElementById("sym").value.trim();
-      const side = document.getElementById("side").value;
-      const mode = document.getElementById("mode").value;
-      const qty = parseFloat(document.getElementById("qty").value);
-      const reduce = document.getElementById("reduce").value === "yes";
-      if (!sym) {
-        if (outOrder) {
-          outOrder.classList.add("err");
-          outOrder.textContent = "请填写交易对";
-        }
-        setOrderRawVisible(true);
-        return;
-      }
-      if (mode === "amount" && Number.isNaN(qty)) {
-        if (outOrder) {
-          outOrder.classList.add("err");
-          outOrder.textContent = "按基础币下单时请填写有效数量";
-        }
-        setOrderRawVisible(true);
-        return;
-      }
-      const body = {
-        secret: getSecret(),
-        account_id: accountId,
-        action: side,
-        symbol: sym,
-        reduce_only: reduce,
-      };
-      if (mode === "amount") {
-        body.amount = qty;
-        body.use_base_amount = true;
-      } else {
-        body.use_base_amount = false;
-      }
-
-      try {
-        const r = await fetch("/api/order", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify(body),
-        });
-        const t = await r.text();
-        let d;
-        try { d = JSON.parse(t); } catch { d = { raw: t }; }
-        if (outOrder) outOrder.textContent = JSON.stringify(d, null, 2);
-        if (!r.ok || (d && d.ok === false)) {
-          if (outOrder) outOrder.classList.add("err");
-          if (orderPlain && d && d.error) {
-            const errText = String(d.error).replace(/</g, "&lt;").replace(/&/g, "&amp;");
-            orderPlain.innerHTML =
-              `<div class="row-line"><strong style="color:var(--err)">下单失败</strong></div>` +
-              `<div class="row-line hint">${errText}</div>`;
-            orderPlain.style.display = "block";
-            if (orderToggleWrap) orderToggleWrap.style.display = "block";
-          } else {
-            renderOrderSummary(null);
-          }
-          setOrderRawVisible(true);
-          loadAccountLog();
-        } else {
-          if (outOrder) outOrder.classList.remove("err");
-          renderOrderSummary(d);
-          setOrderRawVisible(false);
-          loadAccountLog();
-        }
-      } catch (e) {
-        if (outOrder) {
-          outOrder.classList.add("err");
-          outOrder.textContent = String(e);
-        }
-        renderOrderSummary(null);
-        setOrderRawVisible(true);
-        loadAccountLog();
-      }
-    }
-
     document.getElementById("btnSaveSecret").addEventListener("click", saveSecret);
     document.getElementById("btnClearSecret").addEventListener("click", clearSecret);
     function addAccountRow() {
@@ -2296,7 +2298,6 @@
         setBalanceRawJsonVisible(!balanceRawVisible);
       });
     }
-    btnOrder.addEventListener("click", doOrder);
 
     async function doWebhookTest() {
       const s = getSecret();
@@ -2436,11 +2437,6 @@
         updateButtons();
       });
     }
-    if (btnToggleOrderRaw) {
-      btnToggleOrderRaw.addEventListener("click", () => {
-        setOrderRawVisible(!orderRawVisible);
-      });
-    }
 
     function bindCopyButton(buttonId, textareaId, okText, restoreText) {
       document.getElementById(buttonId)?.addEventListener("click", async () => {
@@ -2460,27 +2456,255 @@
       });
     }
 
-    bindCopyButton(
-      "btnCopyTvTemplateCapitalWebhook",
-      "tplTvTemplateCapitalWebhook",
-      "已复制",
-      "复制「跟随模板下单」JSON"
-    );
-    bindCopyButton(
-      "btnCopyTvFollowAmountWebhook",
-      "tplTvFollowAmountWebhook",
-      "已复制",
-      "复制「跟随TV策略下单」JSON"
-    );
+    function tvWizardGenerate() {
+      const out = document.getElementById("tvWizardOutput");
+      if (!out) return;
+      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      const tpl =
+        mode === "follow_tv" ? TV_TPL_WEBHOOK_FOLLOW_TV : TV_TPL_WEBHOOK_TEMPLATE_CAPITAL;
+      let s = tpl.trim();
+      const accId = document.getElementById("tvWebhookAccountSelect")?.value?.trim() || "";
+      const parts = [];
+      if (accId) parts.push(`  "account_id": ${JSON.stringify(accId)}`);
+      if (parts.length) {
+        const m = s.match(/^\s*\{/);
+        if (m) {
+          s = s.replace(/^\s*\{/, "{\n" + parts.join(",\n") + ",");
+        } else {
+          s = parts.join(",\n") + "\n" + s;
+        }
+      }
+      out.value = s;
+    }
+
+    async function tvWizardSaveFollow() {
+      if (!getSecret()) {
+        alert("请先填写并保存访问密钥");
+        return;
+      }
+      if (!ensureAdminAction()) return;
+      const sizingMode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      try {
+        const r = await fetch("/api/bot-settings", {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            webhook_sizing_mode: sizingMode,
+            webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
+          }),
+        });
+        const t = await r.text();
+        let d;
+        try {
+          d = JSON.parse(t);
+        } catch {
+          d = {};
+        }
+        if (!r.ok || !d.ok) {
+          alert(d.error || t || "保存失败");
+          return;
+        }
+        alert("跟单模式已保存（与概览里其他设置互不覆盖）");
+        await fetchStatus();
+      } catch (e) {
+        alert(String(e));
+      }
+    }
+
+    document.getElementById("btnTvWizardGenerate")?.addEventListener("click", tvWizardGenerate);
+    document.getElementById("btnTvWizardSaveFollow")?.addEventListener("click", tvWizardSaveFollow);
+    document.getElementById("btnTvWizardCopyOutput")?.addEventListener("click", async () => {
+      const el = document.getElementById("tvWizardOutput");
+      const b = document.getElementById("btnTvWizardCopyOutput");
+      if (!el) return;
+      try {
+        await navigator.clipboard.writeText(el.value);
+        if (b) {
+          const prev = b.textContent;
+          b.textContent = "已复制";
+          setTimeout(() => {
+            b.textContent = prev;
+          }, 2000);
+        }
+      } catch {
+        el.select();
+        document.execCommand("copy");
+      }
+    });
 
     const host = window.location.origin;
     document.getElementById("webhookHint").textContent = host + "/webhook";
+
+    async function refreshTrailingStatus() {
+      const box = document.getElementById("trailingRunStat");
+      const topHint = document.getElementById("trailingHintTop");
+      const sel = document.getElementById("accountSelectTrailing");
+      if (!box || !sel) return;
+      if (!getSecret()) {
+        box.textContent = "—";
+        if (topHint) topHint.textContent = "请在「概览」保存访问密钥后使用本页。";
+        return;
+      }
+      if (topHint) topHint.textContent = "币安 U 本位或 OKX 永续；与 Webhook 共用账户 API。";
+      try {
+        const r = await fetch("/api/trailing-stop/status", { headers: authHeaders() });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || JSON.stringify(d));
+        const tasks = d.tasks || [];
+        const id = sel.value;
+        const cur = id ? tasks.find((t) => String(t.account_id) === id) : null;
+        if (!id) {
+          box.textContent = "请选择账户。";
+          return;
+        }
+        if (!cur) {
+          box.textContent = "当前账户未运行移动止盈。";
+          return;
+        }
+        const run = cur.running ? "运行中" : "已停止";
+        const p = cur.params || {};
+        const px =
+          p.use_last_price === true
+            ? "最新价"
+            : "标记价";
+        const tpm = p.take_profit_mode;
+        const eat = p.exchange_algo_type || "stop_market";
+        let cm = "市价";
+        if (tpm === "track" || p.trailing_exec === "exchange_stop") {
+          cm = eat === "stop_limit" ? "条件限价(STOP)" : "条件市价(STOP_MARKET)";
+        } else if (
+          tpm === "limit_ioc" ||
+          p.close_mode === "limit_ioc" ||
+          p.close_mode === "limit"
+        ) {
+          cm = "限价IOC";
+        }
+        box.textContent =
+          `状态: ${run}\n` +
+          `开始: ${cur.started_at || "—"}\n` +
+          (cur.stopped_at ? `结束: ${cur.stopped_at}\n` : "") +
+          `计价: ${px} · 平仓: ${cm} · 有仓=${p.monitor_interval ?? "—"}s · 空仓=${p.idle_no_position_sec ?? "—"}s\n` +
+          `止损=${p.stop_loss_pct ?? "—"}%\n` +
+          `最近: ${cur.last_status || "—"}`;
+      } catch (e) {
+        box.textContent = "查询失败: " + e.message;
+      }
+    }
+
+    async function doTrailingStart() {
+      const hint = document.getElementById("trailingFormHint");
+      if (hint) hint.textContent = "";
+      if (!ensureAdminAction()) return;
+      const sel = document.getElementById("accountSelectTrailing");
+      const account_id = sel && sel.value;
+      if (!account_id) {
+        alert("请选择账户");
+        return;
+      }
+      const num = (id) => {
+        const v = parseFloat(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : NaN;
+      };
+      const body = {
+        secret: getSecret(),
+        account_id,
+        use_last_price:
+          (document.getElementById("trailingPriceSource")?.value || "mark") === "last",
+        take_profit_mode:
+          document.getElementById("trailingTakeProfitMode")?.value || "track",
+        limit_offset_bps: num("trailingTrackLimitOffsetBps"),
+        idle_no_position_sec: num("trailingIdleNoPosition"),
+        monitor_interval: num("trailingMonitorInterval"),
+        stop_loss_pct: num("trailingStopLossPct"),
+        low_trail_stop_loss_pct: num("trailingLowTrailStop"),
+        trail_stop_loss_pct: num("trailingTrailStopLossPct"),
+        higher_trail_stop_loss_pct: num("trailingHigherTrailStopPct"),
+        low_trail_profit_threshold: num("trailingLowTrailProfit"),
+        first_trail_profit_threshold: num("trailingFirstTrailProfit"),
+        second_trail_profit_threshold: num("trailingSecondTrailProfit"),
+        feishu_webhook: document.getElementById("trailingFeishuWebhook").value.trim() || null,
+        blacklist: document.getElementById("trailingBlacklist").value.trim() || null,
+      };
+      for (const k of Object.keys(body)) {
+        if (
+          k === "secret" ||
+          k === "account_id" ||
+          k === "feishu_webhook" ||
+          k === "blacklist" ||
+          k === "use_last_price" ||
+          k === "take_profit_mode"
+        )
+          continue;
+        if (typeof body[k] === "number" && !Number.isFinite(body[k])) {
+          if (hint) hint.textContent = "请填写有效的数字参数";
+          return;
+        }
+      }
+      if (
+        !Number.isFinite(body.limit_offset_bps) ||
+        body.limit_offset_bps < 0 ||
+        body.limit_offset_bps > 500
+      ) {
+        if (hint) hint.textContent = "触发→委托价差基点须在 0～500（追踪模式为限价相对触发价的偏移）";
+        return;
+      }
+      if (body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 || body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1) {
+        if (hint) hint.textContent = "两档回撤比例须在 0～1 之间（如 0.3）";
+        return;
+      }
+      if (body.idle_no_position_sec < 5 || body.idle_no_position_sec > 120) {
+        if (hint) hint.textContent = "无持仓轮询间隔须在 5～120 秒之间";
+        return;
+      }
+      try {
+        const r = await fetch("/api/trailing-stop/start", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || d.hint || JSON.stringify(d));
+        if (hint) hint.textContent = "已启动";
+        refreshTrailingStatus();
+      } catch (e) {
+        if (hint) hint.textContent = "启动失败: " + e.message;
+      }
+    }
+
+    async function doTrailingStop() {
+      const hint = document.getElementById("trailingFormHint");
+      if (hint) hint.textContent = "";
+      if (!ensureAdminAction()) return;
+      const sel = document.getElementById("accountSelectTrailing");
+      const account_id = sel && sel.value;
+      if (!account_id) {
+        alert("请选择账户");
+        return;
+      }
+      try {
+        const r = await fetch("/api/trailing-stop/stop", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ secret: getSecret(), account_id }),
+        });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || JSON.stringify(d));
+        if (hint) hint.textContent = "已停止";
+        refreshTrailingStatus();
+      } catch (e) {
+        if (hint) hint.textContent = "停止失败: " + e.message;
+      }
+    }
 
     function initTabs() {
       document.querySelectorAll(".tab-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
           const name = btn.getAttribute("data-tab");
           if (!name) return;
+          if (trailingPollTimer) {
+            clearInterval(trailingPollTimer);
+            trailingPollTimer = null;
+          }
           document.querySelectorAll(".tab-btn").forEach((b) => {
             const on = b === btn;
             b.classList.toggle("active", on);
@@ -2496,10 +2720,18 @@
           if (name === "balance" && getSecret()) {
             doBalance().catch(() => {});
           }
+          if (name === "trailing") {
+            refreshTrailingStatus();
+            trailingPollTimer = setInterval(refreshTrailingStatus, 2500);
+          }
         });
       });
     }
     initTabs();
+
+    document.getElementById("btnTrailingStart")?.addEventListener("click", doTrailingStart);
+    document.getElementById("btnTrailingStop")?.addEventListener("click", doTrailingStop);
+    document.getElementById("accountSelectTrailing")?.addEventListener("change", refreshTrailingStatus);
 
     function maybeRefreshBalanceIfVisible() {
       const p = document.getElementById("panel-balance");
