@@ -3035,8 +3035,8 @@ def api_trailing_stop_start():
         monitor_interval = float(body.get("monitor_interval", 1))
     except (TypeError, ValueError):
         monitor_interval = 1.0
-    if monitor_interval < 1 or monitor_interval > 120:
-        return jsonify({"ok": False, "error": "monitor_interval 须在 1～120 秒之间"}), 400
+    if monitor_interval < 0.5 or monitor_interval > 120:
+        return jsonify({"ok": False, "error": "monitor_interval 须在 0.5～120 秒之间"}), 400
 
     try:
         idle_no_position_sec = float(body.get("idle_no_position_sec", 10))

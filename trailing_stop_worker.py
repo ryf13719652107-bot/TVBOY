@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 import requests
@@ -126,6 +127,7 @@ class TrailingStopWorker:
         self.highest_profits: dict[str, float] = {}
         self.current_tiers: dict[str, str] = {}
         self.detected_positions: set[str] = set()
+        self._last_refresh_time: dict[str, float] = {}
 
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
@@ -237,6 +239,10 @@ class TrailingStopWorker:
             trigger = entry_price * (1.0 - profit_cutoff / 100.0)
             close_side = "BUY"
         side_ccxt = close_side.lower()
+
+        if time.time() - self._last_refresh_time.get(symbol, 0.0) < 5.0:
+            return
+        self._last_refresh_time[symbol] = time.time()
 
         with self.trade_lock:
             self.exchange.load_markets()
@@ -455,8 +461,12 @@ class TrailingStopWorker:
             return p_mark, p_mark, p_mark, mark_px, mark_px
         last_px = mark_px
         try:
-            with self.trade_lock:
-                tk = self.exchange.fetch_ticker(symbol)
+            batch = getattr(self, "_batch_tickers", None)
+            if batch and isinstance(batch, dict):
+                tk = batch.get(symbol, {})
+            else:
+                with self.trade_lock:
+                    tk = self.exchange.fetch_ticker(symbol)
             last_raw = _fe_float(tk.get("last") or tk.get("close"), 0.0)
             if last_raw > 0:
                 last_px = last_raw
@@ -634,6 +644,20 @@ class TrailingStopWorker:
         has_open_for_interval = False
         px_tag = "混合(标+新取保守)" if self.use_last_price else "标记"
         use_ex = self.exchange_sync_stop and self._sync_algo_supported()
+
+        self._batch_tickers = None
+        if self.use_last_price:
+            try:
+                with self.trade_lock:
+                    all_tickers = self.exchange.fetch_tickers()
+                self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
+            except Exception as e:
+                logger.warning(
+                    "移动止盈[%s] 批量获取最新价失败，回退逐标拉取: %s",
+                    self.account_id, e,
+                )
+                self._batch_tickers = None
+
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
                 position
@@ -809,6 +833,7 @@ class TrailingStopWorker:
                 ):
                     continue
 
+        self._batch_tickers = None
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"
         if len(lines) > 12:
             summary += f" …共{len(lines)}个"
