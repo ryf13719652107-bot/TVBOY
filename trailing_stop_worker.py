@@ -493,8 +493,8 @@ class TrailingStopWorker:
         signal_price: float | None = None,
     ) -> bool:
         """
-        平仓：market 或 limit_ioc（IOC 限价优先吃盘口，未成交量再市价 reduceOnly）。
-        signal_price：触发平仓时用于计价/限价锚点的价格（与浮盈计算一致）；限价模式建议必传。
+        平仓：market 为纯市价；limit_ioc 为单笔 IOC 限价，不补市价（未全成则返回 False 留仓下轮再试）。
+        signal_price：限价锚点，建议必传；限价模式下无有效价则不平仓。
         """
         try:
             if self.close_mode == "market":
@@ -520,85 +520,52 @@ class TrailingStopWorker:
                         )
                     if sig <= 0:
                         logger.warning(
-                            "移动止盈[%s] %s 无有效参考价格，改用市价平仓",
+                            "移动止盈[%s] %s 限价平仓：无有效参考价，已跳过（不转市价）",
                             self.account_id,
                             symbol,
                         )
-                        self.exchange.create_order(
-                            symbol,
-                            "market",
-                            side,
-                            amount,
-                            None,
-                            {"reduceOnly": True},
-                        )
-                        mode_txt = "市价(因无有效参考价)"
+                        return False
+                    ob = self.exchange.fetch_order_book(symbol, limit=5)
+                    bids = ob.get("bids") or []
+                    asks = ob.get("asks") or []
+                    bid0 = float(bids[0][0]) if bids else sig
+                    ask0 = float(asks[0][0]) if asks else sig
+                    bps = self.limit_offset_bps / 10000.0
+                    if side == "sell":
+                        ref = min(sig, bid0)
+                        limit_px = ref * (1.0 - bps)
                     else:
-                        ob = self.exchange.fetch_order_book(symbol, limit=5)
-                        bids = ob.get("bids") or []
-                        asks = ob.get("asks") or []
-                        bid0 = float(bids[0][0]) if bids else sig
-                        ask0 = float(asks[0][0]) if asks else sig
-                        bps = self.limit_offset_bps / 10000.0
-                        if side == "sell":
-                            ref = min(sig, bid0)
-                            limit_px = ref * (1.0 - bps)
-                        else:
-                            ref = max(sig, ask0)
-                            limit_px = ref * (1.0 + bps)
-                        limit_px = float(
-                            self.exchange.price_to_precision(symbol, limit_px)
-                        )
-                        amt = float(
-                            self.exchange.amount_to_precision(symbol, amount)
-                        )
-                        if amt <= 0:
-                            raise ValueError("平仓数量精度后为 0")
-                        order = self.exchange.create_order(
+                        ref = max(sig, ask0)
+                        limit_px = ref * (1.0 + bps)
+                    limit_px = float(
+                        self.exchange.price_to_precision(symbol, limit_px)
+                    )
+                    amt = float(
+                        self.exchange.amount_to_precision(symbol, amount)
+                    )
+                    if amt <= 0:
+                        raise ValueError("平仓数量精度后为 0")
+                    order = self.exchange.create_order(
+                        symbol,
+                        "limit",
+                        side,
+                        amt,
+                        limit_px,
+                        {"reduceOnly": True, "timeInForce": "IOC"},
+                    )
+                    filled = _fe_float(order.get("filled"), 0.0)
+                    eps = max(1e-12, amt * 1.0e-8)
+                    if filled <= 0 or filled + eps < amt:
+                        logger.warning(
+                            "移动止盈[%s] %s 限价IOC 未全部成交 "
+                            "filled=%s amt=%s，不补市价，仓位保留",
+                            self.account_id,
                             symbol,
-                            "limit",
-                            side,
+                            filled,
                             amt,
-                            limit_px,
-                            {"reduceOnly": True, "timeInForce": "IOC"},
                         )
-                        filled = _fe_float(order.get("filled"), 0.0)
-                        remaining = float(
-                            self.exchange.amount_to_precision(
-                                symbol, max(0.0, amt - filled)
-                            )
-                        )
-                        if filled <= 0:
-                            logger.warning(
-                                "移动止盈[%s] %s IOC 限价未成交，改市价全量",
-                                self.account_id,
-                                symbol,
-                            )
-                            self.exchange.create_order(
-                                symbol,
-                                "market",
-                                side,
-                                amt,
-                                None,
-                                {"reduceOnly": True},
-                            )
-                        elif remaining > 0:
-                            logger.info(
-                                "移动止盈[%s] %s IOC 部分成交 filled=%s 剩余市价=%s",
-                                self.account_id,
-                                symbol,
-                                filled,
-                                remaining,
-                            )
-                            self.exchange.create_order(
-                                symbol,
-                                "market",
-                                side,
-                                remaining,
-                                None,
-                                {"reduceOnly": True},
-                            )
-                        mode_txt = f"限价IOC(锚≈{sig:.8g})"
+                        return False
+                    mode_txt = f"限价IOC(锚≈{sig:.8g})"
 
             logger.info(
                 "移动止盈[%s] 已平仓 %s 数量 %s side=%s 方式=%s",
@@ -741,21 +708,23 @@ class TrailingStopWorker:
                 if tier_ex_th is not None and profit_pct <= tier_ex_th + 1.0e-9:
                     logger.info(
                         "移动止盈[%s] %s 分档(交易所) 峰值回撤触发 "
-                        "profit=%.4f%% line=%.4f%% 档=%s",
+                        "profit=%.4f%% line=%.4f%% 档=%s 交由条件单执行",
                         self.account_id,
                         symbol,
                         profit_pct,
                         tier_ex_th,
                         current_tier,
                     )
-                    if self.close_position(
+                    self._sync_trailing_stop_algo(
                         symbol,
+                        side,
+                        entry_price,
                         position_amt,
-                        "sell" if side == "long" else "buy",
-                        signal_price=mark_px,
-                    ):
-                        continue
-                    # 平仓失败时仍尝试同步条件单，避免无保护裸奔
+                        current_tier,
+                        highest_profit,
+                        _profit_pct=profit_pct,
+                    )
+                    continue
                 self._sync_trailing_stop_algo(
                     symbol,
                     side,

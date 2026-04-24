@@ -739,7 +739,7 @@
           <input type="number" id="trailingTrackLimitOffsetBps" min="0" max="500" step="1" value="25" title="多头平多：限价≈触发价×(1−基点/10000)再至少下移 2 个 tick；波动大或标记价触发时建议≥20 基点，过小易「已触发但不成交」。" />
         </div>
       </div>
-      <p class="hint" style="margin-top: 0.35rem;">「条件限价追踪」：触发后挂的是被动限价；若限价仍高于市价（多头卖出），会长时间不成交——请加大「触发→委托价差」或改用条件市价。程序已保证限价相对触发价至少偏离 2 个价格 tick。止损%、以及旧任务缺 exchange_algo_type 时曾误走 STOP_MARKET；选限价后请停止再启动一次任务。旧接口「限价 IOC」未成交时会补市价。</p>
+      <p class="hint" style="margin-top: 0.35rem;">「条件限价追踪」：交易所以 CONDITIONAL 限价腿成交为主；本机**软件触发**平仓为单笔**限价 IOC**，未全成不补市价，下轮会再试。选「市价」时轮询/软件平仓为纯市价。请加大「触发→委托价差」可减轻有触发但 IOC 不吃的概率。</p>
       <div class="row" style="margin-top: 0.65rem;">
         <div>
           <label for="trailingLowTrailProfit">低档盈利阈值 %</label>

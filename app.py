@@ -3073,7 +3073,8 @@ def api_trailing_stop_start():
             close_mode_str = "market"
             trailing_exec = "signal"
         elif t in ("track", "限价", "追踪", "limit_track", "l"):
-            close_mode_str = "market"
+            # 所里用条件 STOP+限价；程序代为平仓时仅走 IOC 限价，不转市价（见 TrailingStopWorker.close_position）
+            close_mode_str = "limit_ioc"
             trailing_exec = "exchange_stop"
             exchange_algo_type = "stop_limit"
         else:
