@@ -1706,10 +1706,14 @@ def dashboard_auth_response_if_invalid(*, allow_viewer: bool = False):
 
 
 def normalize_symbol(raw: str) -> str:
-    """BINANCE:BTCUSDT.P -> BTC/USDT"""
+    """BINANCE:BTCUSDT.P -> BTC/USDT;  ETH/USDT:USDT -> ETH/USDT"""
     s = raw.strip().upper()
-    s = re.sub(r"^[^:]+:", "", s)
+    # 仅截交易所前缀（如 BINANCE:）：要求 : 前不含 /，避免误伤 ETH/USDT:USDT
+    if "/" not in s.split(":", 1)[0]:
+        s = re.sub(r"^[^:]+:", "", s)
     s = s.replace(".P", "").replace("-PERP", "")
+    # 截结算后缀：ETH/USDT:USDT → ETH/USDT
+    s = s.split(":")[0] if ":" in s else s
     if "/" in s:
         a, b = s.split("/", 1)
         return f"{a}/{b}"
