@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -243,8 +244,8 @@ DISPLAY_EST_FEE_RATE = _parse_display_est_fee_rate(os.getenv("DISPLAY_EST_FEE_RA
 # Webhook 聚合信号 / 按账户执行记录：持久化到 data/*.json，不自动删除条数、不自动清空
 ACCOUNT_LOG_QUERY_MAX = 50000
 
-_account_log: list[dict[str, Any]] = []
-_signal_log: list[dict[str, Any]] = []
+_account_log: deque[dict[str, Any]] = deque()
+_signal_log: deque[dict[str, Any]] = deque()
 # 多线程并发时保护内存列表与写盘（避免查余额/拉日志与 webhook 交错损坏数据）
 _LOG_LOCK = threading.RLock()
 _BALANCE_CACHE_LOCK = threading.RLock()
@@ -320,21 +321,21 @@ def _delete_rows_in_jsonl(path: Path, should_delete) -> int:
 def _save_execution_log() -> None:
     _EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _EXECUTION_LOG_PATH.with_suffix(".tmp")
-    payload = {"version": 1, "items": _account_log}
+    payload = {"version": 1, "items": list(_account_log)}
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp.replace(_EXECUTION_LOG_PATH)
-    _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, _account_log)
+    _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, list(_account_log))
 
 
 def _save_signal_log() -> None:
     _SIGNAL_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _SIGNAL_LOG_PATH.with_suffix(".tmp")
-    payload = {"version": 1, "items": _signal_log}
+    payload = {"version": 1, "items": list(_signal_log)}
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     tmp.replace(_SIGNAL_LOG_PATH)
-    _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, _signal_log)
+    _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, list(_signal_log))
 
 
 def _trim_hot_logs_locked(kind: str) -> None:
@@ -342,36 +343,34 @@ def _trim_hot_logs_locked(kind: str) -> None:
         max_keep = max(1, LOG_HOT_MAX_EXECUTION)
         hot = _account_log
         archive_path = _EXECUTION_ARCHIVE_JSONL_PATH
-        save_fn = _save_execution_log
     else:
         max_keep = max(1, LOG_HOT_MAX_SIGNAL)
         hot = _signal_log
         archive_path = _SIGNAL_ARCHIVE_JSONL_PATH
-        save_fn = _save_signal_log
     if len(hot) <= max_keep:
         return
-    overflow = hot[max_keep:]
+    overflow: list[dict[str, Any]] = []
+    while len(hot) > max_keep:
+        overflow.append(hot.pop())
     if overflow:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         with open(archive_path, "a", encoding="utf-8") as f:
-            for row in reversed(overflow):
+            for row in overflow:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    del hot[max_keep:]
-    save_fn()
 
 
 def _reload_persisted_logs() -> None:
     global _account_log, _signal_log
-    _account_log = _load_persisted_jsonl_list(_EXECUTION_LOG_JSONL_PATH)
-    _signal_log = _load_persisted_jsonl_list(_SIGNAL_LOG_JSONL_PATH)
+    _account_log = deque(_load_persisted_jsonl_list(_EXECUTION_LOG_JSONL_PATH))
+    _signal_log = deque(_load_persisted_jsonl_list(_SIGNAL_LOG_JSONL_PATH))
     if not _account_log:
-        _account_log = _load_persisted_json_list(_EXECUTION_LOG_PATH)
+        _account_log = deque(_load_persisted_json_list(_EXECUTION_LOG_PATH))
         if _account_log:
-            _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, _account_log)
+            _rewrite_jsonl_from_newest(_EXECUTION_LOG_JSONL_PATH, list(_account_log))
     if not _signal_log:
-        _signal_log = _load_persisted_json_list(_SIGNAL_LOG_PATH)
+        _signal_log = deque(_load_persisted_json_list(_SIGNAL_LOG_PATH))
         if _signal_log:
-            _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, _signal_log)
+            _rewrite_jsonl_from_newest(_SIGNAL_LOG_JSONL_PATH, list(_signal_log))
     if _backfill_account_log_latency_from_signal_log():
         _save_execution_log()
     with _LOG_LOCK:
@@ -984,9 +983,10 @@ def record_webhook_signal(
         entry["filled"] = order.get("filled")
         break
     with _LOG_LOCK:
-        _signal_log.insert(0, entry)
+        _signal_log.appendleft(entry)
         _append_jsonl_row(_SIGNAL_LOG_JSONL_PATH, entry)
-        _trim_hot_logs_locked("signal")
+        if len(_signal_log) >= LOG_HOT_MAX_SIGNAL * 1.5:
+            _trim_hot_logs_locked("signal")
         _record_account_rows_from_webhook(
             payload,
             account_results,
@@ -1169,9 +1169,10 @@ def _append_account_log_row(**kwargs: Any) -> None:
         **kwargs,
     }
     with _LOG_LOCK:
-        _account_log.insert(0, row)
+        _account_log.appendleft(row)
         _append_jsonl_row(_EXECUTION_LOG_JSONL_PATH, row)
-        _trim_hot_logs_locked("execution")
+        if len(_account_log) >= LOG_HOT_MAX_EXECUTION * 1.5:
+            _trim_hot_logs_locked("execution")
 
 
 def _record_account_rows_from_webhook(
@@ -2754,7 +2755,7 @@ def api_signal_log_delete():
         return bad
     global _signal_log
     with _LOG_LOCK:
-        _signal_log = []
+        _signal_log = deque()
         _save_signal_log()
         if _SIGNAL_ARCHIVE_JSONL_PATH.is_file():
             _SIGNAL_ARCHIVE_JSONL_PATH.unlink(missing_ok=True)
@@ -2835,9 +2836,9 @@ def api_account_log_delete():
     with _LOG_LOCK:
         if aid:
             before = len(_account_log)
-            _account_log = [
+            _account_log = deque(
                 e for e in _account_log if str(e.get("account_id")) != aid
-            ]
+            )
             removed_hot = before - len(_account_log)
             removed_archive = _delete_rows_in_jsonl(
                 _EXECUTION_ARCHIVE_JSONL_PATH,
@@ -2846,7 +2847,7 @@ def api_account_log_delete():
             removed = removed_hot + removed_archive
         else:
             removed = len(_account_log)
-            _account_log = []
+            _account_log = deque()
             if _EXECUTION_ARCHIVE_JSONL_PATH.is_file():
                 _EXECUTION_ARCHIVE_JSONL_PATH.unlink(missing_ok=True)
         _save_execution_log()

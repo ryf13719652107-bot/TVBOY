@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 from typing import Any, Callable
@@ -132,6 +133,17 @@ class TrailingStopWorker:
         self.detected_positions: set[str] = set()
         self._last_refresh_time: dict[str, float] = {}
 
+        self._notify_queue: queue.Queue = queue.Queue(maxsize=200)
+        self._notify_failures = 0
+        self._notify_max_failures = 5
+        self._notify_worker_stop = threading.Event()
+        self._notify_worker = threading.Thread(
+            target=self._notify_worker_loop,
+            daemon=True,
+            name=f"feishu-{account_id}",
+        )
+        self._notify_worker.start()
+
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
 
@@ -210,6 +222,18 @@ class TrailingStopWorker:
             return highest_profit * (1.0 - self.higher_trail_stop_loss_pct)
         return None
 
+    def _batch_ticker_price(self, symbol: str, fallback: float) -> float:
+        """从 _batch_tickers 取最新价，仅内存读取，不发起网络请求。
+        若 batch 中无数据则返回 fallback。"""
+        batch = getattr(self, "_batch_tickers", None)
+        if batch and isinstance(batch, dict):
+            tk = batch.get(symbol, {})
+            if isinstance(tk, dict):
+                cp = _fe_float(tk.get("last") or tk.get("close") or tk.get("markPrice"), 0.0)
+                if cp > 0:
+                    return cp
+        return fallback
+
     def _sync_trailing_stop_algo(
         self,
         symbol: str,
@@ -242,10 +266,6 @@ class TrailingStopWorker:
             trigger = entry_price * (1.0 - profit_cutoff / 100.0)
             close_side = "BUY"
         side_ccxt = close_side.lower()
-
-        if time.time() - self._last_refresh_time.get(symbol, 0.0) < 5.0:
-            return
-        self._last_refresh_time[symbol] = time.time()
 
         with self.trade_lock:
             self.exchange.load_markets()
@@ -292,10 +312,26 @@ class TrailingStopWorker:
         if prev_sig == algo_sig:
             return
 
+        if time.time() - self._last_refresh_time.get(symbol, 0.0) < 1.0:
+            return
+        self._last_refresh_time[symbol] = time.time()
+
         if not self._cancel_trailing_algo(symbol):
             logger.warning(
                 "移动止盈[%s] %s 撤旧条件单失败，跳过本轮刷新",
                 self.account_id, symbol,
+            )
+            return
+
+        current_price = self._batch_ticker_price(symbol, trigger)
+
+        if self._batch_tickers is not None and (
+            (side == "long" and current_price <= trigger)
+            or (side == "short" and current_price >= trigger)
+        ):
+            logger.info(
+                "移动止盈[%s] %s 撤单后价格已越过触发线 cur=%.4f trigger=%.4f，跳过本轮重建",
+                self.account_id, symbol, current_price, trigger,
             )
             return
 
@@ -402,25 +438,52 @@ class TrailingStopWorker:
             except Exception:
                 pass
 
+    def _notify_worker_loop(self) -> None:
+        """后台飞书通知线程：从队列消费，熔断保护。"""
+        while not self._notify_worker_stop.is_set():
+            try:
+                msg = self._notify_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if msg is None:
+                break
+            if self._notify_failures >= self._notify_max_failures:
+                logger.warning(
+                    "移动止盈[%s] 飞书熔断已开启，丢弃通知: %s",
+                    self.account_id, msg[:60],
+                )
+                continue
+            try:
+                headers = {"Content-Type": "application/json"}
+                payload = {"msg_type": "text", "content": {"text": msg}}
+                resp = requests.post(
+                    self.feishu_webhook, json=payload, headers=headers, timeout=5
+                )
+                if resp.status_code == 200:
+                    self._notify_failures = 0
+                else:
+                    self._notify_failures += 1
+                    logger.error(
+                        "移动止盈[%s] 飞书通知失败 HTTP %s (累计失败 %d)",
+                        self.account_id, resp.status_code, self._notify_failures,
+                    )
+            except Exception as e:
+                self._notify_failures += 1
+                logger.error(
+                    "移动止盈[%s] 飞书异常: %s (累计失败 %d)",
+                    self.account_id, e, self._notify_failures,
+                )
+
     def send_feishu_notification(self, message: str) -> None:
         if not self.feishu_webhook:
             return
         try:
-            headers = {"Content-Type": "application/json"}
-            payload = {"msg_type": "text", "content": {"text": message}}
-            response = requests.post(
-                self.feishu_webhook, json=payload, headers=headers, timeout=10
+            self._notify_queue.put_nowait(message)
+        except queue.Full:
+            logger.warning(
+                "移动止盈[%s] 飞书通知队列满，丢弃: %s",
+                self.account_id, message[:60],
             )
-            if response.status_code == 200:
-                logger.info("移动止盈[%s] 飞书通知发送成功", self.account_id)
-            else:
-                logger.error(
-                    "移动止盈[%s] 飞书通知失败 HTTP %s",
-                    self.account_id,
-                    response.status_code,
-                )
-        except Exception as e:
-            logger.error("移动止盈[%s] 飞书异常: %s", self.account_id, e)
 
     def fetch_positions(self) -> list[dict[str, Any]]:
         with self.trade_lock:
@@ -552,14 +615,19 @@ class TrailingStopWorker:
                     )
                     if amt <= 0:
                         raise ValueError("平仓数量精度后为 0")
-                    order = self.exchange.create_order(
-                        symbol,
-                        "limit",
-                        side,
-                        amt,
-                        limit_px,
-                        {"reduceOnly": True, "timeInForce": "IOC"},
-                    )
+                    old_timeout = getattr(self.exchange, "timeout", 10000)
+                    self.exchange.timeout = 4000
+                    try:
+                        order = self.exchange.create_order(
+                            symbol,
+                            "limit",
+                            side,
+                            amt,
+                            limit_px,
+                            {"reduceOnly": True, "timeInForce": "IOC"},
+                        )
+                    finally:
+                        self.exchange.timeout = old_timeout
                     filled = _fe_float(order.get("filled"), 0.0)
                     eps = max(1e-12, amt * 1.0e-8)
                     if filled <= 0 or filled + eps < amt:
@@ -737,15 +805,16 @@ class TrailingStopWorker:
                         _profit_pct=profit_pct,
                     )
                     continue
-                self._sync_trailing_stop_algo(
-                    symbol,
-                    side,
-                    entry_price,
-                    position_amt,
-                    current_tier,
-                    highest_profit,
-                    _profit_pct=profit_pct,
-                )
+                elif tier_ex_th is not None:
+                    self._sync_trailing_stop_algo(
+                        symbol,
+                        side,
+                        entry_price,
+                        position_amt,
+                        current_tier,
+                        highest_profit,
+                        _profit_pct=profit_pct,
+                    )
             elif current_tier == "低档保护止盈":
                 # 与交易所路径一致：仅按「峰值×回撤」与底线取 max，不再用当前浮盈贴价
                 low_eff = self._tier_profit_exit_threshold(
@@ -758,11 +827,12 @@ class TrailingStopWorker:
                         symbol,
                         low_eff,
                     )
+                    signal_price = _last_px if self.use_last_price else mark_px
                     if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=mark_px,
+                        signal_price=signal_price,
                     ):
                         continue
 
@@ -775,11 +845,12 @@ class TrailingStopWorker:
                         symbol,
                         trail_stop_loss,
                     )
+                    signal_price = _last_px if self.use_last_price else mark_px
                     if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=mark_px,
+                        signal_price=signal_price,
                     ):
                         continue
 
@@ -794,11 +865,12 @@ class TrailingStopWorker:
                         symbol,
                         trail_stop_loss,
                     )
+                    signal_price = _last_px if self.use_last_price else mark_px
                     if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=mark_px,
+                        signal_price=signal_price,
                     ):
                         continue
 
@@ -809,11 +881,12 @@ class TrailingStopWorker:
                     symbol,
                     profit_pct,
                 )
+                signal_price = _last_px if self.use_last_price else mark_px
                 if self.close_position(
                     symbol,
                     position_amt,
                     "sell" if side == "long" else "buy",
-                    signal_price=mark_px,
+                    signal_price=signal_price,
                 ):
                     continue
 
@@ -870,6 +943,8 @@ class TrailingStopWorker:
                 if stop_event.wait(timeout=wait_sec):
                     break
         finally:
+            self._notify_worker_stop.set()
+            self._notify_worker.join(timeout=3)
             if self.exchange_sync_stop:
                 for sym in list(self._algo_trailing_id.keys()):
                     self._cancel_trailing_algo(sym)
