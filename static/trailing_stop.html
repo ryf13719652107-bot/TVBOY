@@ -83,7 +83,7 @@
         <button type="button" class="secondary" id="btnSaveSecret">保存密钥</button>
         <button type="button" class="secondary" id="btnClearSecret">清除</button>
       </div>
-      <p class="hint">密钥仅存浏览器 localStorage（键名 tv_binance_dashboard_secret）。</p>
+      <p class="hint">密钥仅存浏览器 localStorage（键名 tv_binance_dashboard_secret）。飞书 Webhook 与黑名单亦存本机（与主站移动止盈页共用键名），填一次可长期保留。</p>
     </div>
 
     <div class="card">
@@ -185,6 +185,8 @@
 
   <script>
     const KEY = "tv_binance_dashboard_secret";
+    const TRAIL_FEISHU_LS = "tv_binance_trailing_feishu_webhook";
+    const TRAIL_BLACKLIST_LS = "tv_binance_trailing_blacklist";
     const secretEl = document.getElementById("secret");
     const accountSelect = document.getElementById("accountSelect");
     const runStat = document.getElementById("runStat");
@@ -198,8 +200,31 @@
     function getSecret() {
       return (secretEl.value || "").trim();
     }
+    function loadTrailingFormPrefs() {
+      const h = localStorage.getItem(TRAIL_FEISHU_LS);
+      const fe = document.getElementById("feishuWebhook");
+      if (fe && h !== null) fe.value = h;
+      const bls = localStorage.getItem(TRAIL_BLACKLIST_LS);
+      const bl = document.getElementById("blacklist");
+      if (bl && bls !== null) bl.value = bls;
+    }
+    function saveTrailingFormPrefs() {
+      const fe = document.getElementById("feishuWebhook");
+      if (fe) {
+        const v = fe.value.trim();
+        if (v) localStorage.setItem(TRAIL_FEISHU_LS, v);
+        else localStorage.removeItem(TRAIL_FEISHU_LS);
+      }
+      const bl = document.getElementById("blacklist");
+      if (bl) {
+        const v = bl.value.trim();
+        if (v) localStorage.setItem(TRAIL_BLACKLIST_LS, v);
+        else localStorage.removeItem(TRAIL_BLACKLIST_LS);
+      }
+    }
     function loadSecret() {
       secretEl.value = localStorage.getItem(KEY) || "";
+      loadTrailingFormPrefs();
       refreshAuth();
     }
     function saveSecret() {
@@ -393,6 +418,7 @@
         const d = await r.json();
         if (!d.ok) throw new Error(d.error || d.hint || JSON.stringify(d));
         formHint.textContent = "已启动";
+        saveTrailingFormPrefs();
         refreshStatus();
       } catch (e) {
         formHint.textContent = "启动失败: " + e.message;
@@ -439,6 +465,8 @@
     btnStart.addEventListener("click", doStart);
     btnStop.addEventListener("click", doStop);
     accountSelect.addEventListener("change", refreshStatus);
+    document.getElementById("feishuWebhook")?.addEventListener("blur", saveTrailingFormPrefs);
+    document.getElementById("blacklist")?.addEventListener("blur", saveTrailingFormPrefs);
 
     loadSecret();
     loadAccounts().then(refreshStatus);

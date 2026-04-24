@@ -2956,10 +2956,17 @@ def api_trailing_stop_status():
     bad = dashboard_auth_response_if_invalid(allow_viewer=True)
     if bad:
         return bad
+    role = dashboard_auth_role()
     with _trailing_stop_tasks_lock:
         snap = dict(_trailing_stop_tasks)
     out: list[dict[str, Any]] = []
     for aid, t in snap.items():
+        params = t.get("params")
+        if role == "viewer" and isinstance(params, dict):
+            p2 = dict(params)
+            if p2.get("feishu_webhook"):
+                p2["feishu_webhook"] = "(已配置，访客不可见)"
+            params = p2
         out.append(
             {
                 "account_id": aid,
@@ -2969,7 +2976,7 @@ def api_trailing_stop_status():
                 "started_at": t.get("started_at"),
                 "stopped_at": t.get("stopped_at"),
                 "last_status": t.get("last_status"),
-                "params": t.get("params"),
+                "params": params,
             }
         )
     return jsonify({"ok": True, "tasks": out})
@@ -3203,6 +3210,20 @@ def api_trailing_stop_start():
                 ),
                 400,
             )
+
+    lo = float(p["low_trail_profit_threshold"])
+    fi = float(p["first_trail_profit_threshold"])
+    se = float(p["second_trail_profit_threshold"])
+    if not (lo < fi < se):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "分档浮盈阈值须严格递增：低档 < 第一档 < 第二档（例如 0.9 < 1.0 < 1.5）",
+                }
+            ),
+            400,
+        )
 
     feishu = body.get("feishu_webhook")
     if feishu is not None and str(feishu).strip():

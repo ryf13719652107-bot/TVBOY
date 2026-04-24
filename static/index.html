@@ -706,7 +706,7 @@
         </div>
         <div>
           <label for="trailingLowTrailStop">低档保护回撤线 %（底线）</label>
-          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" title="进入低档后，实际平仓/挂单阈值=max(本底线%, 最高浮盈×(1−第一档回撤比例))，会随最高浮盈上移；再与当前浮盈取 min 以免触发价越过市价。" />
+          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" title="进入低档后，平仓/条件单线=max(本底线%浮盈, 最高浮盈×(1−第一档回撤比例))，只随历史最高浮盈变；启动任务时要求 低档&lt;第一档&lt;第二档 阈值。" />
         </div>
       </div>
       <div class="row" style="margin-top: 0.65rem;">
@@ -730,7 +730,7 @@
         </div>
       </div>
       <label for="trailingFeishuWebhook" style="margin-top: 0.75rem;">飞书 Webhook（可选）</label>
-      <input id="trailingFeishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+      <input id="trailingFeishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." title="仅保存在本机浏览器，填一次后下次自动带出；与密钥类似，换浏览器或清除站点数据需重填。" />
       <label for="trailingBlacklist" style="margin-top: 0.65rem;">黑名单（可选，逗号或换行分隔）</label>
       <textarea id="trailingBlacklist" rows="2" placeholder="如 BTCUSDT"></textarea>
       <div class="row" style="margin-top: 0.75rem;">
@@ -965,6 +965,9 @@
 
   <script>
     const KEY = "tv_binance_dashboard_secret";
+    /** 与主站「移动止盈」页共用，填写一次后存浏览器，仅本机有效 */
+    const TRAIL_FEISHU_LS = "tv_binance_trailing_feishu_webhook";
+    const TRAIL_BLACKLIST_LS = "tv_binance_trailing_blacklist";
     const secretEl = document.getElementById("secret");
     const statusBox = document.getElementById("statusBox");
     const btnBalance = document.getElementById("btnBalance");
@@ -1621,6 +1624,28 @@
       }
     }
 
+    function loadTrailingFormPrefs() {
+      const h = localStorage.getItem(TRAIL_FEISHU_LS);
+      const fe = document.getElementById("trailingFeishuWebhook");
+      if (fe && h !== null) fe.value = h;
+      const bls = localStorage.getItem(TRAIL_BLACKLIST_LS);
+      const bl = document.getElementById("trailingBlacklist");
+      if (bl && bls !== null) bl.value = bls;
+    }
+    function saveTrailingFormPrefs() {
+      const fe = document.getElementById("trailingFeishuWebhook");
+      if (fe) {
+        const v = fe.value.trim();
+        if (v) localStorage.setItem(TRAIL_FEISHU_LS, v);
+        else localStorage.removeItem(TRAIL_FEISHU_LS);
+      }
+      const bl = document.getElementById("trailingBlacklist");
+      if (bl) {
+        const v = bl.value.trim();
+        if (v) localStorage.setItem(TRAIL_BLACKLIST_LS, v);
+        else localStorage.removeItem(TRAIL_BLACKLIST_LS);
+      }
+    }
     function loadSecret() {
       const s = localStorage.getItem(KEY) || "";
       secretEl.value = s;
@@ -1628,6 +1653,7 @@
       updateButtons();
       loadAccounts();
       fetchStatus();
+      loadTrailingFormPrefs();
     }
     function saveSecret() {
       localStorage.setItem(KEY, secretEl.value.trim());
@@ -2665,6 +2691,7 @@
         const d = await r.json();
         if (!d.ok) throw new Error(d.error || d.hint || JSON.stringify(d));
         if (hint) hint.textContent = "已启动";
+        saveTrailingFormPrefs();
         refreshTrailingStatus();
       } catch (e) {
         if (hint) hint.textContent = "启动失败: " + e.message;
@@ -2732,6 +2759,8 @@
     document.getElementById("btnTrailingStart")?.addEventListener("click", doTrailingStart);
     document.getElementById("btnTrailingStop")?.addEventListener("click", doTrailingStop);
     document.getElementById("accountSelectTrailing")?.addEventListener("change", refreshTrailingStatus);
+    document.getElementById("trailingFeishuWebhook")?.addEventListener("blur", saveTrailingFormPrefs);
+    document.getElementById("trailingBlacklist")?.addEventListener("blur", saveTrailingFormPrefs);
 
     function maybeRefreshBalanceIfVisible() {
       const p = document.getElementById("panel-balance");

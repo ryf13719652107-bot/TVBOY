@@ -182,6 +182,24 @@ class TrailingStopWorker:
                 "移动止盈[%s] 撤移动止盈条件单失败 %s: %s", self.account_id, symbol, e
             )
 
+    def _tier_profit_exit_threshold(
+        self, current_tier: str, highest_profit: float
+    ) -> float | None:
+        """
+        与交易所条件单、非交易所轮询共用的「自峰值回撤后」浮盈比例阈值(%)，仅与 highest 有关。
+        未进入任一档 返回 None（调用方应已把「无」挡在门外）。
+        """
+        if current_tier == "低档保护止盈":
+            return max(
+                self.low_trail_stop_loss_pct,
+                highest_profit * (1.0 - self.trail_stop_loss_pct),
+            )
+        if current_tier == "第一档移动止盈":
+            return highest_profit * (1.0 - self.trail_stop_loss_pct)
+        if current_tier == "第二档移动止盈":
+            return highest_profit * (1.0 - self.higher_trail_stop_loss_pct)
+        return None
+
     def _sync_trailing_stop_algo(
         self,
         symbol: str,
@@ -191,7 +209,7 @@ class TrailingStopWorker:
         current_tier: str,
         highest_profit: float,
         *,
-        profit_pct: float,
+        _profit_pct: float,
     ) -> None:
         """币安：CONDITIONAL STOP / STOP_MARKET。OKX：计划委托 ordType=trigger + limit|market（ccxt）。"""
         if not self._sync_algo_supported():
@@ -199,25 +217,13 @@ class TrailingStopWorker:
         if current_tier == "无":
             self._cancel_trailing_algo(symbol)
             return
-        if current_tier == "低档保护止盈":
-            # 原逻辑仅固定「低档回撤线%」，最高到过 1.5% 但未到第一档阈值时，挂单线不随最高浮盈变——此处用第一档回撤比例从峰值收紧，且不低于低档底线
-            profit_cutoff = max(
-                self.low_trail_stop_loss_pct,
-                highest_profit * (1.0 - self.trail_stop_loss_pct),
-            )
-        elif current_tier == "第一档移动止盈":
-            profit_cutoff = highest_profit * (1.0 - self.trail_stop_loss_pct)
-        elif current_tier == "第二档移动止盈":
-            profit_cutoff = highest_profit * (1.0 - self.higher_trail_stop_loss_pct)
-        else:
+        th = self._tier_profit_exit_threshold(current_tier, highest_profit)
+        if th is None:
             self._cancel_trailing_algo(symbol)
             return
-
-        slip = max(5.0e-4, abs(profit_pct) * 1.0e-5)
-        if profit_pct > slip + 1e-9:
-            profit_cutoff = min(profit_cutoff, profit_pct - slip)
-        if current_tier == "低档保护止盈":
-            profit_cutoff = max(profit_cutoff, self.low_trail_stop_loss_pct)
+        # 回撤止盈线只按「历史最高浮盈」计算，再不要用 min(当前浮盈±滑点) 去贴价。
+        # 贴价会表现成：K 线附近出现「很低浮盈就有一条限价/条件线」，或达到一档后线随价格回撤而「下移」。
+        profit_cutoff = th
 
         if side == "long":
             trigger = entry_price * (1.0 + profit_cutoff / 100.0)
@@ -527,6 +533,8 @@ class TrailingStopWorker:
                 f"[移动止盈] 账户 {self.account_id} 平仓 {symbol} 数量 {amount} "
                 f"side={side} {mode_txt}"
             )
+            if self.exchange_sync_stop:
+                self._cancel_trailing_algo(symbol)
             self.detected_positions.discard(symbol)
             self.highest_profits.pop(symbol, None)
             self.current_tiers.pop(symbol, None)
@@ -624,6 +632,27 @@ class TrailingStopWorker:
             logger.info("移动止盈[%s] %s", self.account_id, line)
 
             if use_ex:
+                tier_ex_th = self._tier_profit_exit_threshold(
+                    current_tier, highest_profit
+                )
+                if tier_ex_th is not None and profit_pct <= tier_ex_th + 1.0e-9:
+                    logger.info(
+                        "移动止盈[%s] %s 分档(交易所) 峰值回撤触发 "
+                        "profit=%.4f%% line=%.4f%% 档=%s",
+                        self.account_id,
+                        symbol,
+                        profit_pct,
+                        tier_ex_th,
+                        current_tier,
+                    )
+                    if self.close_position(
+                        symbol,
+                        position_amt,
+                        "sell" if side == "long" else "buy",
+                        signal_price=current_price,
+                    ):
+                        continue
+                    # 平仓失败时仍尝试同步条件单，避免无保护裸奔
                 self._sync_trailing_stop_algo(
                     symbol,
                     side,
@@ -631,31 +660,27 @@ class TrailingStopWorker:
                     position_amt,
                     current_tier,
                     highest_profit,
-                    profit_pct=profit_pct,
+                    _profit_pct=profit_pct,
                 )
             elif current_tier == "低档保护止盈":
-                low_eff = max(
-                    self.low_trail_stop_loss_pct,
-                    highest_profit * (1.0 - self.trail_stop_loss_pct),
+                # 与交易所路径一致：仅按「峰值×回撤」与底线取 max，不再用当前浮盈贴价
+                low_eff = self._tier_profit_exit_threshold(
+                    "低档保护止盈", highest_profit
                 )
-                slip = max(5.0e-4, abs(profit_pct) * 1.0e-5)
-                if profit_pct > slip + 1e-9:
-                    low_eff = min(low_eff, profit_pct - slip)
-                low_eff = max(low_eff, self.low_trail_stop_loss_pct)
-                if profit_pct <= low_eff:
+                if low_eff is not None and profit_pct <= low_eff + 1.0e-9:
                     logger.info(
                         "移动止盈[%s] %s 低档保护止盈触发 threshold=%.4f%%",
                         self.account_id,
                         symbol,
                         low_eff,
                     )
-                    self.close_position(
+                    if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=current_price,
-                    )
-                    continue
+                    ):
+                        continue
 
             if not use_ex and current_tier == "第一档移动止盈":
                 trail_stop_loss = highest_profit * (1.0 - self.trail_stop_loss_pct)
@@ -666,13 +691,13 @@ class TrailingStopWorker:
                         symbol,
                         trail_stop_loss,
                     )
-                    self.close_position(
+                    if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=current_price,
-                    )
-                    continue
+                    ):
+                        continue
 
             if not use_ex and current_tier == "第二档移动止盈":
                 trail_stop_loss = highest_profit * (
@@ -685,13 +710,13 @@ class TrailingStopWorker:
                         symbol,
                         trail_stop_loss,
                     )
-                    self.close_position(
+                    if self.close_position(
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=current_price,
-                    )
-                    continue
+                    ):
+                        continue
 
             if profit_pct <= -self.stop_loss_pct:
                 logger.info(
@@ -700,12 +725,13 @@ class TrailingStopWorker:
                     symbol,
                     profit_pct,
                 )
-                self.close_position(
+                if self.close_position(
                     symbol,
                     position_amt,
                     "sell" if side == "long" else "buy",
                     signal_price=current_price,
-                )
+                ):
+                    continue
 
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"
         if len(lines) > 12:
