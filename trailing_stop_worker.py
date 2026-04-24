@@ -486,8 +486,23 @@ class TrailingStopWorker:
             )
 
     def fetch_positions(self) -> list[dict[str, Any]]:
-        with self.trade_lock:
-            return self.exchange.fetch_positions()
+        for attempt in (1, 2):
+            try:
+                with self.trade_lock:
+                    return self.exchange.fetch_positions()
+            except Exception as e:
+                if attempt == 1:
+                    logger.warning(
+                        "移动止盈[%s] 获取持仓失败(%s)，200ms后重试",
+                        self.account_id, e,
+                    )
+                    time.sleep(0.2)
+                else:
+                    logger.error(
+                        "移动止盈[%s] 重试获取持仓仍失败: %s",
+                        self.account_id, e,
+                    )
+                    raise
 
     def _resolve_current_price(self, symbol: str, mark_price: float) -> float:
         """供平仓锚点/兼容旧逻辑；分档与触发请用 _conservative_pnl_pair。"""
@@ -673,7 +688,15 @@ class TrailingStopWorker:
         执行一轮监控。返回 True 表示账户上存在可识别的持仓（含黑名单持仓），
         下一轮应使用「有仓」监控间隔；否则为 False，使用空仓轮询间隔。
         """
-        positions = self.fetch_positions()
+        try:
+            positions = self.fetch_positions()
+        except Exception as e:
+            logger.warning(
+                "移动止盈[%s] 获取持仓连续失败，跳过本轮: %s",
+                self.account_id, e,
+            )
+            return True  # True → 保持高频重试
+
         active_syms: set[str] = set()
         for position in positions:
             sym, q, _, _, sd = _parse_position_row(position)
@@ -696,16 +719,22 @@ class TrailingStopWorker:
 
         self._batch_tickers = None
         if self.use_last_price:
-            try:
-                with self.trade_lock:
-                    all_tickers = self.exchange.fetch_tickers()
-                self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
-            except Exception as e:
-                logger.warning(
-                    "移动止盈[%s] 批量获取最新价失败，回退逐标拉取: %s",
-                    self.account_id, e,
-                )
-                self._batch_tickers = None
+            for _attempt_tk in (1, 2):
+                try:
+                    with self.trade_lock:
+                        all_tickers = self.exchange.fetch_tickers()
+                    self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
+                    break
+                except Exception as e:
+                    self._batch_tickers = None
+                    log_msg = (
+                        "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
+                        if _attempt_tk == 1
+                        else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
+                    )
+                    logger.warning(log_msg, self.account_id, e)
+                    if _attempt_tk == 1:
+                        time.sleep(0.2)
 
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
