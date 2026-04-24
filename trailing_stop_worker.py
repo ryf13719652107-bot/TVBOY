@@ -535,8 +535,7 @@ class TrailingStopWorker:
             if batch and isinstance(batch, dict):
                 tk = batch.get(symbol, {})
             else:
-                with self.trade_lock:
-                    tk = self.exchange.fetch_ticker(symbol)
+                tk = {}
             last_raw = _fe_float(tk.get("last") or tk.get("close"), 0.0)
             if last_raw > 0:
                 last_px = last_raw
@@ -889,6 +888,14 @@ class TrailingStopWorker:
                     signal_price=signal_price,
                 ):
                     continue
+
+        # 清理外部平仓残留的 stale 状态；完全空仓时全清
+        for sym in list(self.highest_profits.keys()):
+            if sym not in active_syms:
+                self.highest_profits.pop(sym, None)
+                self.current_tiers.pop(sym, None)
+                self.detected_positions.discard(sym)
+                self._last_trigger_tp_str.pop(sym, None)
 
         self._batch_tickers = None
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"

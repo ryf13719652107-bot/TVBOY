@@ -2934,10 +2934,14 @@ def _trailing_stop_thread_main(
             trailing_exec=str(params.get("trailing_exec") or "signal"),
             exchange_algo_type=resolved_eat,
         )
+        _idle_sec = float(params.get("idle_no_position_sec", 10))
+        _monitor_int = float(params["monitor_interval"])
+        if _idle_sec <= 0 or _idle_sec < _monitor_int:
+            _idle_sec = max(_monitor_int * 2, 5)
         worker.run_loop(
             stop_event,
-            float(params["monitor_interval"]),
-            float(params.get("idle_no_position_sec", 10)),
+            _monitor_int,
+            _idle_sec,
         )
     except Exception as e:
         logger.exception("移动止盈线程异常 账户=%s", aid)
