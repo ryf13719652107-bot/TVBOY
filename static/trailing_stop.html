@@ -100,9 +100,10 @@
       <div class="row" style="margin-top: 0.75rem;">
         <div>
           <label for="priceSource">浮盈计价</label>
-          <select id="priceSource">
+          <select id="priceSource" title="保守=min(标,新) 浮盈；仅最新=分档只按最新价浮盈。">
             <option value="mark">标记价（推荐）</option>
-            <option value="last" selected>最新价（分档用标+新保守价）</option>
+            <option value="last" selected>最新价（min(标,新) 保守）</option>
+            <option value="last_only">仅最新价（分档按最新价）</option>
           </select>
         </div>
         <div>
@@ -170,8 +171,9 @@
       <label for="feishuWebhook" style="margin-top: 0.75rem;">飞书 Webhook（可选）</label>
       <input id="feishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
 
-      <label for="blacklist" style="margin-top: 0.65rem;">黑名单交易对（可选，逗号或换行分隔，如 BTCUSDT）</label>
-      <textarea id="blacklist" rows="2" placeholder="留空表示不过滤"></textarea>
+      <label for="blacklist" style="margin-top: 0.65rem;">黑名单交易对（逗号或换行分隔，与 console 中持仓 symbol 归一后一致）</label>
+      <textarea id="blacklist" rows="2" placeholder="如 BTC/USDT:USDT">ETH/USDT:USDT</textarea>
+      <p class="hint" style="margin-top:0.3rem;">默认已写 ETH 合约（币安 U 本位常见 unified）；需让移动止盈管 ETH 时<strong>请清空</strong>。多品种可追加逗号/换行。</p>
 
       <p class="hint">无仓时按「无持仓间隔」只拉仓位；有仓时按「有持仓间隔」；选最新价时每个监控标的额外请求 ticker。</p>
 
@@ -321,7 +323,12 @@
         }
         const run = cur.running ? "运行中" : "已停止";
         const p = cur.params || {};
-        const px = p.use_last_price === true ? "最新价" : "标记价";
+        const px =
+          p.use_last_price && p.use_last_price_only
+            ? "仅最新价"
+            : p.use_last_price
+              ? "最新价(保守)"
+              : "标记价";
         const tpm = p.take_profit_mode;
         const eat = p.exchange_algo_type || "stop_market";
         let cm = "市价";
@@ -360,10 +367,12 @@
         const v = parseFloat(document.getElementById(id).value);
         return Number.isFinite(v) ? v : NaN;
       };
+      const _ps = document.getElementById("priceSource")?.value || "mark";
       const body = {
         secret: getSecret(),
         account_id,
-        use_last_price: (document.getElementById("priceSource")?.value || "mark") === "last",
+        use_last_price: _ps === "last" || _ps === "last_only",
+        use_last_price_only: _ps === "last_only",
         take_profit_mode: document.getElementById("takeProfitMode")?.value || "track",
         limit_offset_bps: num("trackLimitOffsetBps"),
         idle_no_position_sec: num("idleNoPosition"),
@@ -385,6 +394,7 @@
           k === "feishu_webhook" ||
           k === "blacklist" ||
           k === "use_last_price" ||
+          k === "use_last_price_only" ||
           k === "take_profit_mode"
         )
           continue;

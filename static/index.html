@@ -705,10 +705,11 @@
           <label for="trailingPriceSource">浮盈计价</label>
           <select
             id="trailingPriceSource"
-            title="选「最新价」时：分档/最高/触发线用 min(标,新) 浮盈，减少 1s 插针误进档；条件单在交易所上仍用标记价触发。选「标记价」不额外取 ticker。"
+            title="最新价(保守)=分档用 min(标,新) 浮盈。仅最新价=分档只按最新价浮盈。选标记价不额外取 ticker。条件单在交易所的触发价类型与「浮盈计价」一致。"
           >
             <option value="mark">标记价（推荐）</option>
-            <option value="last" selected>最新价（分档用标+新保守，每仓多一次 ticker）</option>
+            <option value="last" selected>最新价（分档用 min(标,新) 保守）</option>
+            <option value="last_only">仅最新价（分档按最新价，不取小）</option>
           </select>
         </div>
         <div>
@@ -772,8 +773,9 @@
       </div>
       <label for="trailingFeishuWebhook" style="margin-top: 0.75rem;">飞书 Webhook（可选）</label>
       <input id="trailingFeishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." title="仅保存在本机浏览器，填一次后下次自动带出；与密钥类似，换浏览器或清除站点数据需重填。" />
-      <label for="trailingBlacklist" style="margin-top: 0.65rem;">黑名单（可选，逗号或换行分隔）</label>
-      <textarea id="trailingBlacklist" rows="2" placeholder="如 BTCUSDT"></textarea>
+      <label for="trailingBlacklist" style="margin-top: 0.65rem;">黑名单（逗号或换行分隔，与 console 中持仓 symbol 归一后一致）</label>
+      <textarea id="trailingBlacklist" rows="2" placeholder="如 BTC/USDT:USDT">ETH/USDT:USDT</textarea>
+      <p class="hint" style="margin-top:0.3rem;">默认已写 ETH 合约（币安 U 本位永续统一符号）；需让移动止盈管 ETH 时<strong>请清空</strong>本框。OKX 等所请按实际持仓 symbol 填写。</p>
       <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border);">
         <label style="font-size:0.85rem;font-weight:600;color:var(--muted);">参数预设</label>
         <div class="row" style="gap:0.35rem;margin-top:0.25rem;">
@@ -2856,9 +2858,11 @@
         const run = cur.running ? "运行中" : "已停止";
         const p = cur.params || {};
         const px =
-          p.use_last_price === true
-            ? "最新价"
-            : "标记价";
+          p.use_last_price && p.use_last_price_only
+            ? "仅最新价"
+            : p.use_last_price
+              ? "最新价(保守)"
+              : "标记价";
         const tpm = p.take_profit_mode;
         const eat = p.exchange_algo_type || "stop_market";
         let cm = "市价";
@@ -2899,11 +2903,12 @@
         const v = parseFloat(document.getElementById(id).value);
         return Number.isFinite(v) ? v : NaN;
       };
+      const _ps = document.getElementById("trailingPriceSource")?.value || "mark";
       const body = {
         secret: getSecret(),
         account_id,
-        use_last_price:
-          (document.getElementById("trailingPriceSource")?.value || "mark") === "last",
+        use_last_price: _ps === "last" || _ps === "last_only",
+        use_last_price_only: _ps === "last_only",
         take_profit_mode:
           document.getElementById("trailingTakeProfitMode")?.value || "track",
         limit_offset_bps: num("trailingTrackLimitOffsetBps"),
@@ -2926,6 +2931,7 @@
           k === "feishu_webhook" ||
           k === "blacklist" ||
           k === "use_last_price" ||
+          k === "use_last_price_only" ||
           k === "take_profit_mode"
         )
           continue;

@@ -90,6 +90,7 @@ class TrailingStopWorker:
         blacklist: set[str] | None = None,
         status_hook: Callable[[str], None] | None = None,
         use_last_price: bool = False,
+        use_last_price_only: bool = False,
         close_mode: str = "market",
         limit_offset_bps: float = 25.0,
         trailing_exec: str = "signal",
@@ -100,6 +101,8 @@ class TrailingStopWorker:
         self.trade_lock = trade_lock
         self._norm = normalize_symbol_fn
         self.use_last_price = bool(use_last_price)
+        # 仅在「用最新价」时生效：True=分档/峰值仅用最新价浮盈；False= min(标,新) 保守
+        self.use_last_price_only = bool(use_last_price_only) and self.use_last_price
         cm = (close_mode or "market").strip().lower()
         if cm == "limit":
             cm = "limit_ioc"
@@ -452,9 +455,10 @@ class TrailingStopWorker:
     ) -> tuple[float, float, float, float, float]:
         """
         返回 (profit_conservative, p_mark, p_last, mark_px, last_px)：
-        用「标记价、最新价」各算一次浮盈；分档/最高/是否触发/是否软件平仓
-        一律用 min(两浮盈) —— 避免仅「最新价」在 1s~数秒内插针，标记价未跟上时
-        误抬 highest、误进档、误挂条件单或下一拍立刻软件平仓，表现为「没满足移动止盈线却成交/挂单」。
+        用「标记价、最新价」各算一次浮盈。分档/最高/是否触发/是否软件平仓用的「决策浮盈」：
+        - use_last_price_only：仅用最新价侧浮盈 p_last；
+        - 否则用 min(两浮盈) —— 减少仅「最新价」在 1s~数秒内插针、标记价未跟上时
+        误抬 highest、误进档、误挂条件单或下一拍立刻软件平仓。
 
         若未选最新价，不额外请求 ticker，新=标（避免无谓请求）。
         """
@@ -475,13 +479,16 @@ class TrailingStopWorker:
                 last_px = last_raw
         except Exception as e:
             logger.warning(
-                "移动止盈[%s] 获取最新价(保守浮盈)失败 %s: %s",
+                "移动止盈[%s] 获取最新价(分档用)失败 %s: %s",
                 self.account_id,
                 symbol,
                 e,
             )
         p_last = self._pnl_pct(side, entry_price, last_px) if last_px > 0 else 0.0
-        profit_cons = min(p_mark, p_last)
+        if self.use_last_price_only:
+            profit_cons = p_last
+        else:
+            profit_cons = min(p_mark, p_last)
         return profit_cons, p_mark, p_last, mark_px, last_px
 
     def close_position(
@@ -612,7 +619,12 @@ class TrailingStopWorker:
 
         lines: list[str] = []
         has_open_for_interval = False
-        px_tag = "混合(标+新取保守)" if self.use_last_price else "标记"
+        if not self.use_last_price:
+            px_tag = "标记"
+        elif self.use_last_price_only:
+            px_tag = "仅最新"
+        else:
+            px_tag = "混合(标+新取保守)"
         use_ex = self.exchange_sync_stop and self._sync_algo_supported()
 
         self._batch_tickers = None
@@ -826,12 +838,18 @@ class TrailingStopWorker:
                 if self.exchange_algo_type == "stop_limit"
                 else f"{plat}条件市价"
             )
+        if not self.use_last_price:
+            price_mode_txt = "标记价"
+        elif self.use_last_price_only:
+            price_mode_txt = "仅最新价(分档)"
+        else:
+            price_mode_txt = "最新价(min标新)"
         logger.info(
             "移动止盈[%s] 循环启动 有仓=%ss 空仓=%ss 计价=%s 执行=%s",
             self.account_id,
             monitor_interval,
             idle_no_position_sec,
-            "最新价" if self.use_last_price else "标记价",
+            price_mode_txt,
             ex_txt,
         )
         try:

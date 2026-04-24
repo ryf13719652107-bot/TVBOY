@@ -2923,6 +2923,7 @@ def _trailing_stop_thread_main(
             blacklist=params.get("blacklist") or set(),
             status_hook=_hook,
             use_last_price=bool(params.get("use_last_price")),
+            use_last_price_only=bool(params.get("use_last_price_only")),
             close_mode=str(params.get("close_mode") or "market"),
             limit_offset_bps=float(params.get("limit_offset_bps", 25)),
             trailing_exec=str(params.get("trailing_exec") or "signal"),
@@ -3065,6 +3066,19 @@ def api_trailing_stop_start():
     else:
         use_last_price = bool(raw_last)
 
+    raw_only = body.get("use_last_price_only")
+    if isinstance(raw_only, str):
+        use_last_price_only = raw_only.strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    else:
+        use_last_price_only = bool(raw_only)
+    if not use_last_price:
+        use_last_price_only = False
+
     exchange_algo_type = "stop_market"
     tpm_in = body.get("take_profit_mode")
     if tpm_in is not None:
@@ -3178,6 +3192,7 @@ def api_trailing_stop_start():
             "monitor_interval": monitor_interval,
             "idle_no_position_sec": idle_no_position_sec,
             "use_last_price": use_last_price,
+            "use_last_price_only": use_last_price_only,
             "take_profit_mode": take_profit_mode,
             "close_mode": close_mode_str,
             "limit_offset_bps": limit_offset_bps,
