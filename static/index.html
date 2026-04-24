@@ -665,9 +665,12 @@
       <div class="row" style="margin-top: 0.35rem;">
         <div>
           <label for="trailingPriceSource">浮盈计价</label>
-          <select id="trailingPriceSource">
+          <select
+            id="trailingPriceSource"
+            title="选「最新价」时：分档/最高/触发线用 min(标,新) 浮盈，减少 1s 插针误进档；条件单在交易所上仍用标记价触发。选「标记价」不额外取 ticker。"
+          >
             <option value="mark">标记价（推荐）</option>
-            <option value="last" selected>最新价（更敏感，每仓多一次 ticker）</option>
+            <option value="last" selected>最新价（分档用标+新保守，每仓多一次 ticker）</option>
           </select>
         </div>
         <div>

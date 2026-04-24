@@ -161,11 +161,11 @@ class TrailingStopWorker:
             return float(prec)
         return 1e-6
 
-    def _cancel_trailing_algo(self, symbol: str) -> None:
-        aid = self._algo_trailing_id.pop(symbol, None)
+    def _cancel_trailing_algo(self, symbol: str) -> bool:
         self._last_trigger_tp_str.pop(symbol, None)
+        aid = self._algo_trailing_id.get(symbol)
         if not aid:
-            return
+            return True
         try:
             with self.trade_lock:
                 if self._is_binance():
@@ -175,19 +175,24 @@ class TrailingStopWorker:
                 elif self._is_okx():
                     self.exchange.cancel_order(str(aid), symbol, {"trigger": True})
                 else:
-                    return
+                    return True
+            self._algo_trailing_id.pop(symbol, None)
             logger.info("移动止盈[%s] 已撤条件单 %s id=%s", self.account_id, symbol, aid)
+            return True
         except Exception as e:
             logger.warning(
                 "移动止盈[%s] 撤移动止盈条件单失败 %s: %s", self.account_id, symbol, e
             )
+            return False
 
     def _tier_profit_exit_threshold(
         self, current_tier: str, highest_profit: float
     ) -> float | None:
         """
-        与交易所条件单、非交易所轮询共用的「自峰值回撤后」浮盈比例阈值(%)，仅与 highest 有关。
-        未进入任一档 返回 None（调用方应已把「无」挡在门外）。
+        条件单 & 轮询共用的「自峰值回撤后」浮盈比例阈值(%)。
+        低档保护：复用第一档的回撤比例 trail_stop_loss_pct（峰值 × (1 - 回撤比例)），
+        同时叠加 low_trail_stop_loss_pct 绝对底线取 max，避免浮盈尚低时被浅回撤打出。
+        未进入任一档返回 None。
         """
         if current_tier == "低档保护止盈":
             return max(
@@ -266,7 +271,7 @@ class TrailingStopWorker:
                 qf = 0.0
             if qf <= 0:
                 return
-            wt = "CONTRACT_PRICE" if self.use_last_price else "MARK_PRICE"
+            wt = "LAST_PRICE" if self.use_last_price else "MARK_PRICE"
             tp_str = str(trigger)
             lim_str = str(limit_px)
 
@@ -275,7 +280,13 @@ class TrailingStopWorker:
         if prev_sig == algo_sig:
             return
 
-        self._cancel_trailing_algo(symbol)
+        if not self._cancel_trailing_algo(symbol):
+            logger.warning(
+                "移动止盈[%s] %s 撤旧条件单失败，跳过本轮刷新",
+                self.account_id, symbol,
+            )
+            return
+
         aid: str | None = None
         try:
             with self.trade_lock:
@@ -309,9 +320,7 @@ class TrailingStopWorker:
                     co_params: dict[str, Any] = {
                         "reduceOnly": True,
                         "triggerPrice": float(tp_str),
-                        "triggerPxType": "last"
-                        if self.use_last_price
-                        else "mark",
+                        "triggerPxType": "last" if self.use_last_price else "mark",
                     }
                     amt = float(qty_str)
                     if self.exchange_algo_type == "stop_limit":
@@ -406,7 +415,7 @@ class TrailingStopWorker:
             return self.exchange.fetch_positions()
 
     def _resolve_current_price(self, symbol: str, mark_price: float) -> float:
-        """浮盈计算用价：标记价或最新价（失败则回退标记价）。"""
+        """供平仓锚点/兼容旧逻辑；分档与触发请用 _conservative_pnl_pair。"""
         if not self.use_last_price:
             return float(mark_price)
         try:
@@ -420,6 +429,47 @@ class TrailingStopWorker:
                 "移动止盈[%s] 获取最新价失败 %s: %s", self.account_id, symbol, e
             )
         return float(mark_price)
+
+    @staticmethod
+    def _pnl_pct(side: str, entry_price: float, price: float) -> float:
+        if entry_price <= 0 or price <= 0:
+            return 0.0
+        if side == "long":
+            return (price - entry_price) / entry_price * 100.0
+        return (entry_price - price) / entry_price * 100.0
+
+    def _mark_last_pnl(
+        self, symbol: str, side: str, entry_price: float, mark_price: float
+    ) -> tuple[float, float, float, float, float]:
+        """
+        返回 (profit_conservative, p_mark, p_last, mark_px, last_px)：
+        用「标记价、最新价」各算一次浮盈；分档/最高/是否触发/是否软件平仓
+        一律用 min(两浮盈) —— 避免仅「最新价」在 1s~数秒内插针，标记价未跟上时
+        误抬 highest、误进档、误挂条件单或下一拍立刻软件平仓，表现为「没满足移动止盈线却成交/挂单」。
+
+        若未选最新价，不额外请求 ticker，新=标（避免无谓请求）。
+        """
+        mark_px = float(mark_price) if mark_price and mark_price > 0 else 0.0
+        p_mark = self._pnl_pct(side, entry_price, mark_px) if mark_px > 0 else 0.0
+        if not self.use_last_price:
+            return p_mark, p_mark, p_mark, mark_px, mark_px
+        last_px = mark_px
+        try:
+            with self.trade_lock:
+                tk = self.exchange.fetch_ticker(symbol)
+            last_raw = _fe_float(tk.get("last") or tk.get("close"), 0.0)
+            if last_raw > 0:
+                last_px = last_raw
+        except Exception as e:
+            logger.warning(
+                "移动止盈[%s] 获取最新价(保守浮盈)失败 %s: %s",
+                self.account_id,
+                symbol,
+                e,
+            )
+        p_last = self._pnl_pct(side, entry_price, last_px) if last_px > 0 else 0.0
+        profit_cons = min(p_mark, p_last)
+        return profit_cons, p_mark, p_last, mark_px, last_px
 
     def close_position(
         self,
@@ -455,71 +505,87 @@ class TrailingStopWorker:
                             or tk.get("last")
                             or 0.0
                         )
-                    ob = self.exchange.fetch_order_book(symbol, limit=5)
-                    bids = ob.get("bids") or []
-                    asks = ob.get("asks") or []
-                    bid0 = float(bids[0][0]) if bids else sig
-                    ask0 = float(asks[0][0]) if asks else sig
-                    bps = self.limit_offset_bps / 10000.0
-                    if side == "sell":
-                        ref = min(sig, bid0)
-                        limit_px = ref * (1.0 - bps)
-                    else:
-                        ref = max(sig, ask0)
-                        limit_px = ref * (1.0 + bps)
-                    limit_px = float(
-                        self.exchange.price_to_precision(symbol, limit_px)
-                    )
-                    amt = float(
-                        self.exchange.amount_to_precision(symbol, amount)
-                    )
-                    if amt <= 0:
-                        raise ValueError("平仓数量精度后为 0")
-                    order = self.exchange.create_order(
-                        symbol,
-                        "limit",
-                        side,
-                        amt,
-                        limit_px,
-                        {"reduceOnly": True, "timeInForce": "IOC"},
-                    )
-                    filled = _fe_float(order.get("filled"), 0.0)
-                    remaining = float(
-                        self.exchange.amount_to_precision(
-                            symbol, max(0.0, amt - filled)
-                        )
-                    )
-                    if filled <= 0:
+                    if sig <= 0:
                         logger.warning(
-                            "移动止盈[%s] %s IOC 限价未成交，改市价全量",
+                            "移动止盈[%s] %s 无有效参考价格，改用市价平仓",
                             self.account_id,
                             symbol,
                         )
                         self.exchange.create_order(
                             symbol,
                             "market",
+                            side,
+                            amount,
+                            None,
+                            {"reduceOnly": True},
+                        )
+                        mode_txt = "市价(因无有效参考价)"
+                    else:
+                        ob = self.exchange.fetch_order_book(symbol, limit=5)
+                        bids = ob.get("bids") or []
+                        asks = ob.get("asks") or []
+                        bid0 = float(bids[0][0]) if bids else sig
+                        ask0 = float(asks[0][0]) if asks else sig
+                        bps = self.limit_offset_bps / 10000.0
+                        if side == "sell":
+                            ref = min(sig, bid0)
+                            limit_px = ref * (1.0 - bps)
+                        else:
+                            ref = max(sig, ask0)
+                            limit_px = ref * (1.0 + bps)
+                        limit_px = float(
+                            self.exchange.price_to_precision(symbol, limit_px)
+                        )
+                        amt = float(
+                            self.exchange.amount_to_precision(symbol, amount)
+                        )
+                        if amt <= 0:
+                            raise ValueError("平仓数量精度后为 0")
+                        order = self.exchange.create_order(
+                            symbol,
+                            "limit",
                             side,
                             amt,
-                            None,
-                            {"reduceOnly": True},
+                            limit_px,
+                            {"reduceOnly": True, "timeInForce": "IOC"},
                         )
-                    elif remaining > 0:
-                        logger.info(
-                            "移动止盈[%s] %s IOC 部分成交 filled=%s 剩余市价=%s",
-                            self.account_id,
-                            symbol,
-                            filled,
-                            remaining,
+                        filled = _fe_float(order.get("filled"), 0.0)
+                        remaining = float(
+                            self.exchange.amount_to_precision(
+                                symbol, max(0.0, amt - filled)
+                            )
                         )
-                        self.exchange.create_order(
-                            symbol,
-                            "market",
-                            side,
-                            remaining,
-                            None,
-                            {"reduceOnly": True},
-                        )
-                mode_txt = f"限价IOC(锚≈{sig:.8g})"
+                        if filled <= 0:
+                            logger.warning(
+                                "移动止盈[%s] %s IOC 限价未成交，改市价全量",
+                                self.account_id,
+                                symbol,
+                            )
+                            self.exchange.create_order(
+                                symbol,
+                                "market",
+                                side,
+                                amt,
+                                None,
+                                {"reduceOnly": True},
+                            )
+                        elif remaining > 0:
+                            logger.info(
+                                "移动止盈[%s] %s IOC 部分成交 filled=%s 剩余市价=%s",
+                                self.account_id,
+                                symbol,
+                                filled,
+                                remaining,
+                            )
+                            self.exchange.create_order(
+                                symbol,
+                                "market",
+                                side,
+                                remaining,
+                                None,
+                                {"reduceOnly": True},
+                            )
+                        mode_txt = f"限价IOC(锚≈{sig:.8g})"
 
             logger.info(
                 "移动止盈[%s] 已平仓 %s 数量 %s side=%s 方式=%s",
@@ -566,7 +632,7 @@ class TrailingStopWorker:
 
         lines: list[str] = []
         has_open_for_interval = False
-        px_tag = "最新" if self.use_last_price else "标记"
+        px_tag = "混合(标+新取保守)" if self.use_last_price else "标记"
         use_ex = self.exchange_sync_stop and self._sync_algo_supported()
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
@@ -588,8 +654,8 @@ class TrailingStopWorker:
                     self.detected_positions.add(symbol)
                 continue
 
-            current_price = self._resolve_current_price(symbol, mark_price)
-            if current_price <= 0:
+            mpx = _fe_float(mark_price, 0.0)
+            if mpx <= 0:
                 continue
 
             if symbol not in self.detected_positions:
@@ -603,10 +669,13 @@ class TrailingStopWorker:
                 logger.info("移动止盈[%s] %s", self.account_id, msg)
                 self.send_feishu_notification(f"[移动止盈] {msg}")
 
-            if side == "long":
-                profit_pct = (current_price - entry_price) / entry_price * 100.0
-            else:
-                profit_pct = (entry_price - current_price) / entry_price * 100.0
+            (
+                profit_pct,
+                p_from_mark,
+                p_from_last,
+                mark_px,
+                _last_px,
+            ) = self._mark_last_pnl(symbol, side, entry_price, mpx)
 
             highest_profit = self.highest_profits.get(symbol, 0.0)
             if profit_pct > highest_profit:
@@ -624,10 +693,17 @@ class TrailingStopWorker:
                 current_tier = "无"
             self.current_tiers[symbol] = current_tier
 
-            line = (
-                f"{symbol} {side}({px_tag}) 浮盈={profit_pct:.2f}% "
-                f"最高={highest_profit:.2f}% 档={current_tier}"
-            )
+            if self.use_last_price and abs(p_from_last - p_from_mark) > 0.01:
+                line = (
+                    f"{symbol} {side}({px_tag}) 浮盈(决)={profit_pct:.2f}% "
+                    f"标={p_from_mark:.2f}% 新={p_from_last:.2f}% "
+                    f"最高={highest_profit:.2f}% 档={current_tier}"
+                )
+            else:
+                line = (
+                    f"{symbol} {side}({px_tag}) 浮盈={profit_pct:.2f}% "
+                    f"最高={highest_profit:.2f}% 档={current_tier}"
+                )
             lines.append(line)
             logger.info("移动止盈[%s] %s", self.account_id, line)
 
@@ -649,7 +725,7 @@ class TrailingStopWorker:
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=current_price,
+                        signal_price=mark_px,
                     ):
                         continue
                     # 平仓失败时仍尝试同步条件单，避免无保护裸奔
@@ -678,7 +754,7 @@ class TrailingStopWorker:
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=current_price,
+                        signal_price=mark_px,
                     ):
                         continue
 
@@ -695,7 +771,7 @@ class TrailingStopWorker:
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=current_price,
+                        signal_price=mark_px,
                     ):
                         continue
 
@@ -714,7 +790,7 @@ class TrailingStopWorker:
                         symbol,
                         position_amt,
                         "sell" if side == "long" else "buy",
-                        signal_price=current_price,
+                        signal_price=mark_px,
                     ):
                         continue
 
@@ -729,7 +805,7 @@ class TrailingStopWorker:
                     symbol,
                     position_amt,
                     "sell" if side == "long" else "buy",
-                    signal_price=current_price,
+                    signal_price=mark_px,
                 ):
                     continue
 
