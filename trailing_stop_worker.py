@@ -277,7 +277,10 @@ class TrailingStopWorker:
                 qf = 0.0
             if qf <= 0:
                 return
-            wt = "LAST_PRICE" if self.use_last_price else "MARK_PRICE"
+            # 币安 USD-M /algoOrder 仅支持 MARK_PRICE、CONTRACT_PRICE，无 LAST_PRICE。
+            # 与「用最新价算浮盈」对应：用 CONTRACT_PRICE（合约最近成交价，文档称 CONTRACT_PRICE 触发）。
+            # 分档在 monitor 内已用 min(标,新) 浮盈，此处勿再误用未定义枚举致拒单/异常。
+            wt = "CONTRACT_PRICE" if self.use_last_price else "MARK_PRICE"
             tp_str = str(trigger)
             lim_str = str(limit_px)
 
