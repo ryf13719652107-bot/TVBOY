@@ -814,11 +814,15 @@ def _normalize_tv_position_side(raw: Any) -> str | None:
     """
     TradingView strategy.market_position / prev_market_position 填充后常见为
     long / short / flat，或数值 1 / -1 / 0。
+    也处理 TV 占位符未替换的情况（如 {{strategy.prev_market_position}}）。
     """
     if raw is None:
         return None
     s = str(raw).strip().lower()
     if not s or s == "nan":
+        return None
+    # TV 占位符未替换时原样发送，如 {{strategy.prev_market_position}}
+    if s.startswith("{{") and s.endswith("}}"):
         return None
     if s in ("1", "1.0", "+1") or s.startswith("long"):
         return "long"
@@ -1743,6 +1747,7 @@ def resolve_symbol(exchange, symbol: str) -> str:
     统一 symbol。注意：BTCUSDT 会先被归一成 BTC/USDT，而 markets 里 BTC/USDT 是现货；
     若 BINANCE_DEFAULT_TYPE=future，必须优先落到 U 本位永续（如 BTC/USDT:USDT），
     否则下单/拉成交会走错现货市场，合约有成交时现货列表仍为空。
+    若币种不存在，自动强制刷新 markets（处理新上线币种）。
     """
     ex_id = _exchange_id(exchange)
     exchange.load_markets()
@@ -1778,6 +1783,14 @@ def resolve_symbol(exchange, symbol: str) -> str:
         for alt in (usdc_sym, symbol):
             if alt in exchange.markets:
                 return alt
+    # 币种不存在时，强制刷新 markets 再试一次（处理新上线币种）
+    logger.info("币种 %s 不存在，强制刷新 markets 重试", symbol)
+    exchange.load_markets(True)  # True = 强制刷新，不用缓存
+    if symbol in exchange.markets:
+        return symbol
+    for alt in candidates:
+        if alt in exchange.markets:
+            return alt
     raise ValueError(f"未知交易对: {symbol}")
 
 
@@ -3432,15 +3445,12 @@ def webhook():
         or ""
     )
     action_wh = str(action_raw).lower().strip()
-    if (
-        bs_wh.get("webhook_sizing_mode") == "follow_tv"
-        and bool(bs_wh.get("webhook_open_only"))
-        and action_wh in ("buy", "sell")
-    ):
+    # 仅开仓模式：忽略所有减仓/平仓信号（不依赖 follow_tv 模式）
+    if bool(bs_wh.get("webhook_open_only")) and action_wh in ("buy", "sell"):
         try:
             if _resolve_reduce_only(payload, action_wh):
                 logger.info(
-                    "Webhook 已启用「跟随TV + 仅开仓」：忽略本次仅减仓/平仓信号 action=%s",
+                    "Webhook 已启用「仅开仓」：忽略本次减仓/平仓信号 action=%s",
                     action_wh,
                 )
                 return jsonify(
@@ -3448,7 +3458,7 @@ def webhook():
                         "ok": True,
                         "skipped": True,
                         "reason": "webhook_open_only",
-                        "message": "跟随TV策略且仅开仓：本次为减仓/平仓类信号，未下单（止盈请用移动止盈）",
+                        "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单（止盈请用移动止盈）",
                     }
                 )
         except Exception as e:

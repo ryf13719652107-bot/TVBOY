@@ -993,7 +993,7 @@
             <input type="checkbox" id="webhookOpenOnly" />
             <span>仅开仓，止盈用移动止盈（忽略 TV 发来的减仓/平仓类 Webhook）</span>
           </label>
-          <span class="help-tip" tabindex="0" data-tip="仅在「跟随TV策略下单」时可选。开启后 reduce_only 的 buy/sell 直接 skipped。须在「移动止盈」页为所选交易所账户启动任务。" style="margin-top:0.35rem;">?</span>
+          <span class="help-tip" tabindex="0" data-tip="开启后 reduce_only 的 buy/sell 直接 skipped。须在「移动止盈」页为所选交易所账户启动任务。" style="margin-top:0.35rem;">?</span>
         </div>
         <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
           <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
@@ -2317,9 +2317,9 @@
     }
 
     function updateWebhookOpenOnlyWrapVisibility() {
-      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
+      // 仅开仓选项在所有下单模式下都可用
       const wrap = document.getElementById("webhookOpenOnlyWrap");
-      if (wrap) wrap.style.display = mode === "follow_tv" ? "" : "none";
+      if (wrap) wrap.style.display = "";
     }
 
     function updateWebhookSettingsPanel() {
