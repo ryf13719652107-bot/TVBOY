@@ -1021,23 +1021,23 @@
         </div>
         <p class="hint" style="margin-top:0.35rem;">记录 TV 发来的每一条 Webhook 信号摘要。如需按笔查看执行明细，切到「交易记录」TAB。</p>
         <div id="signalLogContainer" style="overflow-x:auto;">
-          <table id="signalLogTable" style="width:100%; font-size:0.78rem; table-layout:fixed;">
+          <table id="signalLogTable" style="width:100%; font-size:0.78rem; table-layout:fixed; border-collapse:collapse;">
             <colgroup>
               <col style="width:90px;">
               <col style="width:60px;">
               <col style="width:120px;">
-              <col style="width:80px;">
-              <col style="width:140px;">
+              <col style="width:90px;">
+              <col style="width:160px;">
               <col style="width:80px;">
             </colgroup>
             <thead>
               <tr>
-                <th style="text-align:left;">时间</th>
-                <th style="text-align:center;">方向</th>
-                <th style="text-align:left;">品种</th>
-                <th style="text-align:right;">金额</th>
-                <th style="text-align:left;">账户</th>
-                <th style="text-align:center;">结果</th>
+                <th style="text-align:left; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">时间</th>
+                <th style="text-align:center; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">方向</th>
+                <th style="text-align:left; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">品种</th>
+                <th style="text-align:right; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">金额</th>
+                <th style="text-align:left; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">账户</th>
+                <th style="text-align:center; padding:0.5rem 0.3rem; border-bottom:1px solid var(--border);">结果</th>
               </tr>
             </thead>
             <tbody id="signalLogBody"></tbody>
@@ -1680,12 +1680,12 @@
           const statusText = totalCount > 0 ? `${okCount}/${totalCount} 成功` : (item.ok ? "成功" : "失败");
           const time = escHtml(item.received_at_utc || "");
           return `<tr>
-            <td style="white-space:nowrap; text-align:left;" title="${escHtml(time)}">${_fmtTime(time)}</td>
-            <td style="text-align:center;"><span class="tag ${action === 'buy' ? 'tag-buy' : action === 'sell' ? 'tag-sell' : ''}">${actionText}</span></td>
-            <td style="text-align:left;"><code>${symbol}</code></td>
-            <td style="text-align:right;">${qty}</td>
-            <td style="text-align:left; font-size:0.7rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escHtml(acct)}">${acct}</td>
-            <td style="text-align:center;"><span class="tag ${statusCls}">${statusText}</span></td>
+            <td style="white-space:nowrap; text-align:left; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border);" title="${escHtml(time)}">${_fmtTime(time)}</td>
+            <td style="text-align:center; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border);"><span class="tag ${action === 'buy' ? 'tag-buy' : action === 'sell' ? 'tag-sell' : ''}">${actionText}</span></td>
+            <td style="text-align:left; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border);"><code>${symbol}</code></td>
+            <td style="text-align:right; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border);">${qty}</td>
+            <td style="text-align:left; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border); font-size:0.7rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escHtml(acct)}">${acct}</td>
+            <td style="text-align:center; padding:0.4rem 0.3rem; border-bottom:1px solid var(--border);"><span class="tag ${statusCls}">${statusText}</span></td>
           </tr>`;
         }).join("");
       } catch (e) {
