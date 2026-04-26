@@ -2096,6 +2096,7 @@ def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 "template_capital_usdt": a.get("template_capital_usdt"),
                 "enabled": a.get("enabled", True),
                 "webhook_enabled": a.get("webhook_enabled", True),
+                "webhook_open_only": a.get("webhook_open_only", False),
             }
         )
     return out
@@ -3479,6 +3480,33 @@ def webhook():
     payload_for_log = dict(payload)
 
     def _submit_one(idx: int, account: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any] | None, bool]:
+        # 单账户「仅开仓」判断
+        if account.get("webhook_open_only"):
+            try:
+                action_raw = (
+                    payload.get("action")
+                    or payload.get("side")
+                    or payload.get("strategy.order.action")
+                    or ""
+                )
+                action_wh = str(action_raw).lower().strip()
+                if action_wh in ("buy", "sell") and _resolve_reduce_only(payload, action_wh):
+                    logger.info(
+                        "账户 %s 已启用「仅开仓」：忽略本次减仓/平仓信号 action=%s",
+                        account.get("id"),
+                        action_wh,
+                    )
+                    result_row = {
+                        "account_id": account["id"],
+                        "remark": account.get("remark"),
+                        "ok": True,
+                        "skipped": True,
+                        "reason": "webhook_open_only",
+                        "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单",
+                    }
+                    return idx, result_row, None, False
+            except Exception as e:
+                logger.warning("账户 %s 仅开仓判断异常，继续正常下单: %s", account.get("id"), e)
         ex = get_exchange_for_account(account, purpose="trade")
         op = build_order_payload_for_account(dict(payload), account)
         with _get_account_trade_lock(str(account.get("id") or "")):

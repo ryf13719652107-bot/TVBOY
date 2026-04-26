@@ -2069,6 +2069,7 @@
           fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
           enabled: g("enabled")?.checked !== false,
           webhook_enabled: g("webhook_enabled")?.checked !== false,
+          webhook_open_only: g("webhook_open_only")?.checked === true,
         });
       });
       return rows;
@@ -2091,6 +2092,7 @@
         `<th>固定USDT(回退)</th>` +
         `<th>启用</th>` +
         `<th>Webhook</th>` +
+        `<th>仅开仓</th>` +
         `<th></th>` +
         `</tr>`;
       if (accountsState.length === 0) {
@@ -2128,6 +2130,7 @@
             `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:6rem" /></td>` +
             `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
             `<td><input type="checkbox" name="webhook_enabled" ${row.webhook_enabled !== false ? "checked" : ""} /></td>` +
+            `<td><input type="checkbox" name="webhook_open_only" ${row.webhook_open_only === true ? "checked" : ""} title="启用后该账户只开仓，减仓/平仓信号被忽略" /></td>` +
             `<td><button type="button" class="secondary" data-del="${i}" ${isAdminRole() ? "" : "disabled"}>删除</button></td>` +
             `</tr>`
           );
