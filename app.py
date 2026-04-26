@@ -2096,7 +2096,6 @@ def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 "template_capital_usdt": a.get("template_capital_usdt"),
                 "enabled": a.get("enabled", True),
                 "webhook_enabled": a.get("webhook_enabled", True),
-                "webhook_open_only": a.get("webhook_open_only", False),
             }
         )
     return out
@@ -2146,7 +2145,6 @@ def api_status():
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
             "stop_loss_enabled": bs["stop_loss_enabled"],
             "stop_loss_pct": bs["stop_loss_pct"],
-            "webhook_open_only": bool(bs.get("webhook_open_only")),
             "trailing_stop_tasks": trailing_snap,
             "hint": "Webhook 下单支持两种模式：模板比例/固定USDT，或直接跟随 TradingView 的 amount/quote_amount/contracts。",
         }
@@ -2169,8 +2167,6 @@ def api_bot_settings_put():
         cur["webhook_sizing_mode"] = str(body.get("webhook_sizing_mode") or "").strip().lower()
     if "template_base_capital_usdt" in body and body.get("template_base_capital_usdt") is not None:
         cur["template_base_capital_usdt"] = float(body.get("template_base_capital_usdt"))
-    if "webhook_open_only" in body:
-        cur["webhook_open_only"] = bool(body.get("webhook_open_only"))
     if cur["stop_loss_pct"] <= 0 or cur["stop_loss_pct"] > 50:
         return jsonify({"ok": False, "error": "止损百分比须在 0～50 之间"}), 400
     if cur.get("webhook_sizing_mode") not in ("template_or_fixed", "follow_tv"):
@@ -3446,8 +3442,8 @@ def webhook():
         or ""
     )
     action_wh = str(action_raw).lower().strip()
-    # 仅开仓模式：忽略所有减仓/平仓信号（不依赖 follow_tv 模式）
-    if bool(bs_wh.get("webhook_open_only")) and action_wh in ("buy", "sell"):
+    # 仅开仓模式：仅从消息体读取
+    if bool(payload.get("open_only")) and action_wh in ("buy", "sell"):
         try:
             if _resolve_reduce_only(payload, action_wh):
                 logger.info(
@@ -3480,33 +3476,6 @@ def webhook():
     payload_for_log = dict(payload)
 
     def _submit_one(idx: int, account: dict[str, Any]) -> tuple[int, dict[str, Any], dict[str, Any] | None, bool]:
-        # 单账户「仅开仓」判断
-        if account.get("webhook_open_only"):
-            try:
-                action_raw = (
-                    payload.get("action")
-                    or payload.get("side")
-                    or payload.get("strategy.order.action")
-                    or ""
-                )
-                action_wh = str(action_raw).lower().strip()
-                if action_wh in ("buy", "sell") and _resolve_reduce_only(payload, action_wh):
-                    logger.info(
-                        "账户 %s 已启用「仅开仓」：忽略本次减仓/平仓信号 action=%s",
-                        account.get("id"),
-                        action_wh,
-                    )
-                    result_row = {
-                        "account_id": account["id"],
-                        "remark": account.get("remark"),
-                        "ok": True,
-                        "skipped": True,
-                        "reason": "webhook_open_only",
-                        "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单",
-                    }
-                    return idx, result_row, None, False
-            except Exception as e:
-                logger.warning("账户 %s 仅开仓判断异常，继续正常下单: %s", account.get("id"), e)
         ex = get_exchange_for_account(account, purpose="trade")
         op = build_order_payload_for_account(dict(payload), account)
         with _get_account_trade_lock(str(account.get("id") or "")):

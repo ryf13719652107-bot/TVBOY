@@ -982,12 +982,12 @@
               <option value="follow_tv">跟随TV策略下单</option>
             </select>
         </div>
-        <div class="field-stack" id="webhookOpenOnlyWrap" style="margin-top: 0.65rem; display: none;">
+        <div class="field-stack" id="webhookOpenOnlyWrap" style="margin-top: 0.65rem;">
           <label class="sl-check" style="display:flex;align-items:flex-start;gap:0.45rem;cursor:pointer;">
             <input type="checkbox" id="webhookOpenOnly" />
             <span>仅开仓，止盈用移动止盈（忽略 TV 发来的减仓/平仓类 Webhook）</span>
           </label>
-          <span class="help-tip" tabindex="0" data-tip="开启后 reduce_only 的 buy/sell 直接 skipped。须在「移动止盈」页为所选交易所账户启动任务。" style="margin-top:0.35rem;">?</span>
+          <span class="help-tip" tabindex="0" data-tip="勾选后一键生成的 JSON 会包含 open_only: true。该条消息只开仓，减仓/平仓信号被忽略。" style="margin-top:0.35rem;">?</span>
         </div>
         <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
           <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
@@ -1021,15 +1021,23 @@
         </div>
         <p class="hint" style="margin-top:0.35rem;">记录 TV 发来的每一条 Webhook 信号摘要。如需按笔查看执行明细，切到「交易记录」TAB。</p>
         <div id="signalLogContainer" style="overflow-x:auto;">
-          <table id="signalLogTable" style="width:100%; font-size:0.78rem;">
+          <table id="signalLogTable" style="width:100%; font-size:0.78rem; table-layout:fixed;">
+            <colgroup>
+              <col style="width:90px;">
+              <col style="width:60px;">
+              <col style="width:120px;">
+              <col style="width:80px;">
+              <col style="width:140px;">
+              <col style="width:80px;">
+            </colgroup>
             <thead>
               <tr>
-                <th>时间</th>
-                <th>action</th>
-                <th>symbol</th>
-                <th>金额</th>
-                <th>account_id</th>
-                <th>结果</th>
+                <th style="text-align:left;">时间</th>
+                <th style="text-align:center;">方向</th>
+                <th style="text-align:left;">品种</th>
+                <th style="text-align:right;">金额</th>
+                <th style="text-align:left;">账户</th>
+                <th style="text-align:center;">结果</th>
               </tr>
             </thead>
             <tbody id="signalLogBody"></tbody>
@@ -1662,6 +1670,7 @@
         tbody.innerHTML = items.map((item) => {
           const p = item.payload || {};
           const action = escHtml(p.action || "");
+          const actionText = action === 'buy' ? '买入' : action === 'sell' ? '卖出' : action;
           const symbol = escHtml(p.symbol || item.symbol || "");
           const qty = p.quote_amount || p.amount || p.contracts || "";
           const acct = (item.accounts || []).map((a) => a.account_id || a.remark || "").filter(Boolean).join(", ");
@@ -1671,12 +1680,12 @@
           const statusText = totalCount > 0 ? `${okCount}/${totalCount} 成功` : (item.ok ? "成功" : "失败");
           const time = escHtml(item.received_at_utc || "");
           return `<tr>
-            <td style="white-space:nowrap;" title="${escHtml(time)}">${_fmtTime(time)}</td>
-            <td><span class="tag ${action === 'buy' ? 'tag-buy' : action === 'sell' ? 'tag-sell' : ''}">${action}</span></td>
-            <td><code>${symbol}</code></td>
-            <td>${qty}</td>
-            <td style="font-size:0.7rem;max-width:120px;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(acct)}">${acct}</td>
-            <td><span class="tag ${statusCls}">${statusText}</span></td>
+            <td style="white-space:nowrap; text-align:left;" title="${escHtml(time)}">${_fmtTime(time)}</td>
+            <td style="text-align:center;"><span class="tag ${action === 'buy' ? 'tag-buy' : action === 'sell' ? 'tag-sell' : ''}">${actionText}</span></td>
+            <td style="text-align:left;"><code>${symbol}</code></td>
+            <td style="text-align:right;">${qty}</td>
+            <td style="text-align:left; font-size:0.7rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escHtml(acct)}">${acct}</td>
+            <td style="text-align:center;"><span class="tag ${statusCls}">${statusText}</span></td>
           </tr>`;
         }).join("");
       } catch (e) {
@@ -2069,7 +2078,6 @@
           fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
           enabled: g("enabled")?.checked !== false,
           webhook_enabled: g("webhook_enabled")?.checked !== false,
-          webhook_open_only: g("webhook_open_only")?.checked === true,
         });
       });
       return rows;
@@ -2092,7 +2100,6 @@
         `<th>固定USDT(回退)</th>` +
         `<th>启用</th>` +
         `<th>Webhook</th>` +
-        `<th>仅开仓</th>` +
         `<th></th>` +
         `</tr>`;
       if (accountsState.length === 0) {
@@ -2130,7 +2137,6 @@
             `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:6rem" /></td>` +
             `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
             `<td><input type="checkbox" name="webhook_enabled" ${row.webhook_enabled !== false ? "checked" : ""} /></td>` +
-            `<td><input type="checkbox" name="webhook_open_only" ${row.webhook_open_only === true ? "checked" : ""} title="启用后该账户只开仓，减仓/平仓信号被忽略" /></td>` +
             `<td><button type="button" class="secondary" data-del="${i}" ${isAdminRole() ? "" : "disabled"}>删除</button></td>` +
             `</tr>`
           );
@@ -2313,16 +2319,11 @@
       }
     }
 
-    function updateWebhookOpenOnlyWrapVisibility() {
-      // 仅开仓选项在所有下单模式下都可用
-      const wrap = document.getElementById("webhookOpenOnlyWrap");
-      if (wrap) wrap.style.display = "";
-    }
+
 
     function updateWebhookSettingsPanel() {
       updateWebhookSizingHint();
       updateTemplateBaseFieldHint();
-      updateWebhookOpenOnlyWrapVisibility();
     }
 
     async function fetchStatus() {
@@ -2361,10 +2362,7 @@
           d.webhook_sizing_mode === "follow_tv"
             ? "跟随TV策略下单"
             : "跟随模板下单";
-        const openOnlyLine =
-          d.webhook_sizing_mode === "follow_tv" && d.webhook_open_only
-            ? `<br/><span>Webhook 平仓/减仓</span> <span class="pill on">已忽略（仅开仓）</span>`
-            : "";
+
         const ac = typeof d.accounts_count === "number" ? d.accounts_count : "—";
         const estFeePct =
           (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0
@@ -2400,7 +2398,7 @@
           `<span>已配置 API 的账户</span> ${api}<br/>` +
           `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
           `<span>TV Webhook 密钥</span> ${wh}<br/>` +
-          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}${openOnlyLine}<br/>` +
+          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}<br/>` +
           `${trailingLine}<br/>` +
           `<span>全局模板本金</span> ${Number(d.template_base_capital_usdt) || 0} USDT<br/>` +
           `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}<br/>` +
@@ -2429,10 +2427,6 @@
           !Number.isNaN(Number(d.template_base_capital_usdt))
         ) {
           templateBaseEl.value = String(d.template_base_capital_usdt);
-        }
-        const woo = document.getElementById("webhookOpenOnly");
-        if (woo && typeof d.webhook_open_only === "boolean") {
-          woo.checked = d.webhook_open_only;
         }
         updateWebhookSettingsPanel();
       } catch (e) {
@@ -2475,7 +2469,6 @@
             stop_loss_pct: pct,
             webhook_sizing_mode: sizingMode,
             template_base_capital_usdt: templateBase,
-            webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
           }),
         });
         const t = await r.text();
@@ -2755,8 +2748,10 @@
         mode === "follow_tv" ? TV_TPL_WEBHOOK_FOLLOW_TV : TV_TPL_WEBHOOK_TEMPLATE_CAPITAL;
       let s = tpl.trim();
       const accId = document.getElementById("tvWebhookAccountSelect")?.value?.trim() || "";
+      const openOnly = document.getElementById("webhookOpenOnly")?.checked || false;
       const parts = [];
       if (accId) parts.push(`  "account_id": ${JSON.stringify(accId)}`);
+      if (openOnly) parts.push(`  "open_only": true`);
       if (parts.length) {
         const m = s.match(/^\s*\{/);
         if (m) {
@@ -2781,7 +2776,6 @@
           headers: authHeaders(),
           body: JSON.stringify({
             webhook_sizing_mode: sizingMode,
-            webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
           }),
         });
         const t = await r.text();
