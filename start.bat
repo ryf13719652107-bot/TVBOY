@@ -1,0 +1,16 @@
+@echo off
+chcp 65001 >nul
+echo ============================================
+echo TV量化机器人 - 生产环境启动
+echo ============================================
+
+:: 检查 waitress 是否安装
+python -c "import waitress" 2>nul
+if errorlevel 1 (
+    echo 正在安装 waitress...
+    pip install waitress
+)
+
+:: 启动服务
+echo 启动 Waitress 服务器...
+python start_production.py
