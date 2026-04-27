@@ -36,7 +36,7 @@ class BinanceWebSocketPriceFeed:
             on_price_update: 价格更新回调函数(symbol, price_data)
             testnet: 是否使用测试网
         """
-        self.symbols = [s.upper() for s in symbols]
+        self.symbols = [s.upper().replace('/USDT', 'USDT').replace('/USD', 'USD') for s in symbols]
         self.on_price_update = on_price_update
         self.testnet = testnet
 
@@ -55,125 +55,102 @@ class BinanceWebSocketPriceFeed:
         self._message_count = 0
         self._reconnect_count = 0
 
-    def _get_ws_url(self) -> str:
-        """获取 WebSocket URL"""
+    def _get_ws_url(self, symbol: str, stream_type: str) -> str:
+        """获取单一 WebSocket URL"""
         base_url = (
             "wss://stream.binancefuture.com"  # 测试网
             if self.testnet
             else "wss://fstream.binance.com"   # 主网
         )
+        symbol_lower = symbol.lower().replace('/', '')
+        return f"{base_url}/ws/{symbol_lower}@{stream_type}"
 
-        # 构建订阅流：aggTrade(最新成交) + markPrice(标记价格)
-        streams = []
-        for symbol in self.symbols:
-            symbol_lower = symbol.lower().replace('/', '')  # 移除 /，如 BSB/USDT -> bsbusdt
-            streams.append(f"{symbol_lower}@aggTrade")    # 最新成交价
-            streams.append(f"{symbol_lower}@markPrice")   # 标记价格
-
-        # 使用组合流格式 /stream?streams=stream1/stream2
-        return f"{base_url}/stream?streams={'/'.join(streams)}"
-
-    async def _connect_and_listen(self):
-        """连接 WebSocket 并监听消息"""
-        url = self._get_ws_url()
-        logger.info(f"[WebSocket] 连接中... 订阅 {len(self.symbols)} 个币种")
-
+    async def _subscribe_single(self, symbol: str, stream_type: str):
+        """订阅单一币种的单一数据流"""
+        url = self._get_ws_url(symbol, stream_type)
+        
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                self._ws = ws
-                self._connected = True
-                logger.info(f"[WebSocket] 已连接，订阅流: {len(self.symbols) * 2} 个")
-
+                logger.info(f"[WebSocket] 已连接: {symbol}@{stream_type}")
+                
                 async for message in ws:
                     if self._stop_event.is_set():
                         break
-                    await self._handle_message(message)
-
+                    
+                    try:
+                        data = json.loads(message)
+                        
+                        # 单一连接格式直接是数据，没有 stream 字段
+                        price_data = self._parse_single_message(stream_type, data)
+                        if price_data:
+                            with self._prices_lock:
+                                if symbol not in self._prices:
+                                    self._prices[symbol] = {}
+                                self._prices[symbol].update(price_data)
+                                self._prices[symbol]["received_at"] = time.time()
+                                self._last_update_time[symbol] = time.time()
+                            
+                            self._message_count += 1
+                            
+                            if self.on_price_update:
+                                try:
+                                    self.on_price_update(symbol, self._prices[symbol])
+                                except Exception as e:
+                                    logger.error(f"[WebSocket] 回调错误: {e}")
+                                    
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[WebSocket] JSON解析错误: {e}")
+                    except Exception as e:
+                        logger.error(f"[WebSocket] 消息处理错误: {e}")
+                        
         except ConnectionClosedOK:
-            logger.info("[WebSocket] 连接正常关闭")
+            logger.info(f"[WebSocket] {symbol}@{stream_type} 正常关闭")
         except ConnectionClosed as e:
-            logger.warning(f"[WebSocket] 连接断开: {e}")
+            logger.warning(f"[WebSocket] {symbol}@{stream_type} 连接断开: {e}")
         except Exception as e:
-            logger.error(f"[WebSocket] 连接错误: {e}")
-        finally:
-            self._connected = False
-            self._ws = None
+            logger.error(f"[WebSocket] {symbol}@{stream_type} 错误: {e}")
 
-    async def _handle_message(self, message: str):
-        """处理收到的消息"""
-        try:
-            data = json.loads(message)
-            stream = data.get("stream", "")
-            payload = data.get("data", {})
-
-            # 解析币种
-            symbol = self._extract_symbol(stream)
-            if not symbol:
-                return
-
-            # 解析价格数据
-            price_data = self._parse_price_data(stream, payload)
-            if not price_data:
-                return
-
-            # 更新价格存储
-            with self._prices_lock:
-                if symbol not in self._prices:
-                    self._prices[symbol] = {}
-                self._prices[symbol].update(price_data)
-                self._prices[symbol]["received_at"] = time.time()
-                self._last_update_time[symbol] = time.time()
-
-            self._message_count += 1
-
-            # 触发回调
-            if self.on_price_update:
-                try:
-                    self.on_price_update(symbol, self._prices[symbol])
-                except Exception as e:
-                    logger.error(f"[WebSocket] 回调错误: {e}")
-
-        except json.JSONDecodeError as e:
-            logger.error(f"[WebSocket] JSON解析错误: {e}")
-        except Exception as e:
-            logger.error(f"[WebSocket] 消息处理错误: {e}")
-
-    def _extract_symbol(self, stream: str) -> str | None:
-        """从流名称提取币种"""
-        # 格式: bsbusdt@aggTrade 或 bsbusdt@markPrice
-        for symbol in self.symbols:
-            if stream.lower().startswith(symbol.lower()):
-                return symbol
-        return None
-
-    def _parse_price_data(self, stream: str, payload: dict) -> dict[str, Any] | None:
-        """解析价格数据"""
+    def _parse_single_message(self, stream_type: str, data: dict) -> dict[str, Any] | None:
+        """解析单一连接的消息"""
         result: dict[str, Any] = {}
-
+        
         try:
-            if "@aggTrade" in stream:
+            if stream_type == "aggTrade":
                 # 最新成交
-                result["last"] = float(payload.get("p", 0))  # 成交价格
-                result["trade_time"] = payload.get("T", 0)   # 成交时间
-
-            elif "@markPrice" in stream:
+                result["last"] = float(data.get("p", 0))  # 成交价格
+                result["trade_time"] = data.get("T", 0)   # 成交时间
+                
+            elif stream_type == "markPrice":
                 # 标记价格
-                result["mark"] = float(payload.get("p", 0))   # 标记价格
-                result["index"] = float(payload.get("i", 0))  # 指数价格
-                result["funding_rate"] = float(payload.get("r", 0))  # 资金费率
-                result["next_funding_time"] = payload.get("T", 0)
-
+                result["mark"] = float(data.get("p", 0))   # 标记价格
+                result["index"] = float(data.get("i", 0))  # 指数价格
+                result["funding_rate"] = float(data.get("r", 0))  # 资金费率
+                result["next_funding_time"] = data.get("T", 0)
+                
             return result if result else None
-
+            
         except (ValueError, TypeError) as e:
             logger.error(f"[WebSocket] 价格解析错误: {e}")
             return None
+
+    async def _run_all_subscriptions(self):
+        """运行所有订阅"""
+        tasks = []
+        
+        for symbol in self.symbols:
+            # 为每个币种创建两个任务：aggTrade 和 markPrice
+            tasks.append(self._subscribe_single(symbol, "aggTrade"))
+            tasks.append(self._subscribe_single(symbol, "markPrice"))
+        
+        # 同时运行所有订阅
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _run_loop(self):
         """在线程中运行事件循环"""
         while not self._stop_event.is_set():
             try:
-                asyncio.run(self._connect_and_listen())
+                self._connected = True
+                asyncio.run(self._run_all_subscriptions())
             except Exception as e:
                 logger.error(f"[WebSocket] 事件循环错误: {e}")
 
@@ -181,8 +158,9 @@ class BinanceWebSocketPriceFeed:
                 break
 
             # 重连
+            self._connected = False
             self._reconnect_count += 1
-            wait_time = min(5 + self._reconnect_count * 2, 30)  # 指数退避，最大30秒
+            wait_time = min(5 + self._reconnect_count * 2, 30)
             logger.info(f"[WebSocket] {wait_time}秒后重连... (第{self._reconnect_count}次)")
             time.sleep(wait_time)
 
@@ -199,48 +177,29 @@ class BinanceWebSocketPriceFeed:
             name="websocket-price-feed"
         )
         self._thread.start()
-        logger.info("[WebSocket] 启动成功")
+        logger.info(f"[WebSocket] 启动成功，订阅 {len(self.symbols)} 个币种")
 
     def stop(self):
         """停止 WebSocket 连接"""
         self._stop_event.set()
-
-        if self._ws:
-            try:
-                # 发送关闭帧
-                asyncio.run(self._ws.close())
-            except Exception as e:
-                logger.error(f"[WebSocket] 关闭错误: {e}")
+        self._connected = False
 
         if self._thread:
             self._thread.join(timeout=5)
 
-        self._connected = False
         logger.info("[WebSocket] 已停止")
 
     def get_price(self, symbol: str) -> dict[str, Any] | None:
         """
         获取指定币种的最新价格数据
-
-        Returns:
-            {
-                "last": float,      # 最新成交价
-                "mark": float,      # 标记价格
-                "received_at": float,  # 本地接收时间
-                ...
-            }
         """
-        symbol = symbol.upper()
+        symbol = symbol.upper().replace('/USDT', 'USDT')
         with self._prices_lock:
             return self._prices.get(symbol, {}).copy() if symbol in self._prices else None
 
     def get_price_with_age(self, symbol: str, max_age_sec: float = 1.0) -> dict[str, Any] | None:
         """
         获取价格，如果数据太旧返回 None
-
-        Args:
-            symbol: 币种
-            max_age_sec: 最大允许的数据年龄（秒）
         """
         data = self.get_price(symbol)
         if not data:
@@ -413,15 +372,6 @@ def create_websocket_feed(
 ) -> BinanceWebSocketPriceFeed | OKXWebSocketPriceFeed | None:
     """
     创建对应交易所的 WebSocket 价格订阅
-
-    Args:
-        exchange_id: 'binance' 或 'okx'
-        symbols: 币种列表
-        on_price_update: 价格更新回调
-        testnet: 是否测试网
-
-    Returns:
-        WebSocket 价格订阅实例
     """
     exchange_id = exchange_id.lower()
 
