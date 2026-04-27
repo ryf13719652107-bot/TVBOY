@@ -66,10 +66,11 @@ class BinanceWebSocketPriceFeed:
         # 构建订阅流：aggTrade(最新成交) + markPrice(标记价格)
         streams = []
         for symbol in self.symbols:
-            symbol_lower = symbol.lower()
+            symbol_lower = symbol.lower().replace('/', '')  # 移除 /，如 BSB/USDT -> bsbusdt
             streams.append(f"{symbol_lower}@aggTrade")    # 最新成交价
             streams.append(f"{symbol_lower}@markPrice")   # 标记价格
 
+        # 使用组合流格式 /stream?streams=stream1/stream2
         return f"{base_url}/stream?streams={'/'.join(streams)}"
 
     async def _connect_and_listen(self):
