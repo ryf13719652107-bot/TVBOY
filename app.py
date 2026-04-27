@@ -2944,6 +2944,7 @@ def _trailing_stop_thread_main(
             trailing_exec=str(params.get("trailing_exec") or "signal"),
             exchange_algo_type=resolved_eat,
         )
+        worker.restore_existing_algos()
         _idle_sec = float(params.get("idle_no_position_sec", 10))
         _monitor_int = float(params["monitor_interval"])
         if _idle_sec <= 0 or _idle_sec < _monitor_int:
@@ -3055,8 +3056,8 @@ def api_trailing_stop_start():
         monitor_interval = float(body.get("monitor_interval", 1))
     except (TypeError, ValueError):
         monitor_interval = 1.0
-    if monitor_interval < 0.5 or monitor_interval > 120:
-        return jsonify({"ok": False, "error": "monitor_interval 须在 0.5～120 秒之间"}), 400
+    if monitor_interval < 0.3 or monitor_interval > 120:
+        return jsonify({"ok": False, "error": "monitor_interval 须在 0.3～120 秒之间"}), 400
 
     try:
         idle_no_position_sec = float(body.get("idle_no_position_sec", 10))

@@ -100,6 +100,7 @@ class TrailingStopWorker:
         self.exchange = exchange
         self.account_id = account_id
         self.trade_lock = trade_lock
+        self.price_lock = threading.Lock()
         self._norm = normalize_symbol_fn
         self.use_last_price = bool(use_last_price)
         # 仅在「用最新价」时生效：True=分档/峰值仅用最新价浮盈；False= min(标,新) 保守
@@ -132,6 +133,7 @@ class TrailingStopWorker:
         self.current_tiers: dict[str, str] = {}
         self.detected_positions: set[str] = set()
         self._last_refresh_time: dict[str, float] = {}
+        self._last_tier_sig: dict[str, str] = {}
 
         self._notify_queue: queue.Queue = queue.Queue(maxsize=200)
         self._notify_failures = 0
@@ -143,6 +145,10 @@ class TrailingStopWorker:
             name=f"feishu-{account_id}",
         )
         self._notify_worker.start()
+
+        self._price_feed_stop = threading.Event()
+        self._price_feed_thread: threading.Thread | None = None
+        self._price_feed_data: dict[str, Any] | None = None
 
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
@@ -202,6 +208,74 @@ class TrailingStopWorker:
             )
             return False
 
+    def _price_feed_loop(self, interval: float) -> None:
+        """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。"""
+        while not self._price_feed_stop.is_set():
+            try:
+                with self.price_lock:
+                    tickers = self.exchange.fetch_tickers()
+                if isinstance(tickers, dict):
+                    self._price_feed_data = tickers
+            except Exception:
+                pass
+            self._price_feed_stop.wait(timeout=interval)
+
+    def restore_existing_algos(self) -> None:
+        """启动时扫描交易所已有条件单，恢复 _algo_trailing_id，避免重启后重复挂单。"""
+        try:
+            with self.price_lock:
+                if self._is_binance():
+                    raw = self.exchange.request(
+                        "algoOrder", "fapiPrivate", "GET", {}
+                    )
+                    algo_list = []
+                    if isinstance(raw, dict):
+                        algo_list = raw.get("data", []) if isinstance(raw.get("data"), list) else []
+                    elif isinstance(raw, list):
+                        algo_list = raw
+                    for item in algo_list:
+                        if not isinstance(item, dict):
+                            continue
+                        sym = str(item.get("symbol") or "")
+                        algo_id = str(item.get("algoId") or item.get("clientAlgoId") or "")
+                        status = str(item.get("algoStatus") or "")
+                        if not sym or not algo_id or status != "WORKING":
+                            continue
+                        usym = self._norm_key(sym) if hasattr(self, "_norm_key") else sym
+                        self._algo_trailing_id[usym] = algo_id
+                        logger.info(
+                            "移动止盈[%s] 恢复已有条件单 %s algoId=%s",
+                            self.account_id, usym, algo_id,
+                        )
+                elif self._is_okx():
+                    try:
+                        pos = self.exchange.fetch_positions()
+                    except Exception:
+                        pos = []
+                    active_syms = set()
+                    for p in pos:
+                        sym, q, _, _, _ = _parse_position_row(p)
+                        if sym and q > 0:
+                            active_syms.add(sym)
+                    for sym in active_syms:
+                        try:
+                            orders = self.exchange.fetch_open_orders(sym, {"trigger": True})
+                            for o in (orders or []):
+                                oid = o.get("id")
+                                if oid:
+                                    self._algo_trailing_id[sym] = str(oid)
+                                    logger.info(
+                                        "移动止盈[%s] 恢复OKX条件单 %s id=%s",
+                                        self.account_id, sym, oid,
+                                    )
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(
+                "移动止盈[%s] 恢复条件单失败（可忽略）: %s",
+                self.account_id, e,
+            )
+
     def _tier_profit_exit_threshold(
         self, current_tier: str, highest_profit: float
     ) -> float | None:
@@ -259,16 +333,16 @@ class TrailingStopWorker:
         # 贴价会表现成：K 线附近出现「很低浮盈就有一条限价/条件线」，或达到一档后线随价格回撤而「下移」。
         profit_cutoff = th
 
+        trigger_early_offset = 0.0002
         if side == "long":
-            trigger = entry_price * (1.0 + profit_cutoff / 100.0)
+            trigger = entry_price * (1.0 + profit_cutoff / 100.0) * (1.0 - trigger_early_offset)
             close_side = "SELL"
         else:
-            trigger = entry_price * (1.0 - profit_cutoff / 100.0)
+            trigger = entry_price * (1.0 - profit_cutoff / 100.0) * (1.0 + trigger_early_offset)
             close_side = "BUY"
         side_ccxt = close_side.lower()
 
         with self.trade_lock:
-            self.exchange.load_markets()
             market = self.exchange.market(symbol)
             symbol_id = str(market.get("id") or "")
             if not symbol_id:
@@ -311,6 +385,16 @@ class TrailingStopWorker:
         prev_sig = self._last_trigger_tp_str.get(symbol)
         if prev_sig == algo_sig:
             return
+
+        if prev_sig is not None:
+            parts = prev_sig.split("|")
+            if len(parts) >= 2:
+                try:
+                    prev_tp = float(parts[1])
+                    if abs(trigger - prev_tp) / max(abs(prev_tp), 1e-12) * 100.0 < 0.05:
+                        return
+                except (ValueError, TypeError):
+                    pass
 
         if time.time() - self._last_refresh_time.get(symbol, 0.0) < 1.0:
             return
@@ -488,7 +572,7 @@ class TrailingStopWorker:
     def fetch_positions(self) -> list[dict[str, Any]]:
         for attempt in (1, 2):
             try:
-                with self.trade_lock:
+                with self.price_lock:
                     return self.exchange.fetch_positions()
             except Exception as e:
                 if attempt == 1:
@@ -509,7 +593,7 @@ class TrailingStopWorker:
         if not self.use_last_price:
             return float(mark_price)
         try:
-            with self.trade_lock:
+            with self.price_lock:
                 tk = self.exchange.fetch_ticker(symbol)
             last = _fe_float(tk.get("last") or tk.get("close"), 0.0)
             if last > 0:
@@ -609,7 +693,7 @@ class TrailingStopWorker:
                             symbol,
                         )
                         return False
-                    ob = self.exchange.fetch_order_book(symbol, limit=5)
+                    ob = self.exchange.fetch_order_book(symbol, limit=1)
                     bids = ob.get("bids") or []
                     asks = ob.get("asks") or []
                     bid0 = float(bids[0][0]) if bids else sig
@@ -645,15 +729,34 @@ class TrailingStopWorker:
                     filled = _fe_float(order.get("filled"), 0.0)
                     eps = max(1e-12, amt * 1.0e-8)
                     if filled <= 0 or filled + eps < amt:
-                        logger.warning(
-                            "移动止盈[%s] %s 限价IOC 未全部成交 "
-                            "filled=%s amt=%s，不补市价，仓位保留",
-                            self.account_id,
-                            symbol,
-                            filled,
-                            amt,
-                        )
-                        return False
+                        remaining = amt - filled
+                        if remaining > 0:
+                            logger.warning(
+                                "移动止盈[%s] %s 限价IOC 未全部成交 "
+                                "filled=%s amt=%s，补市价平剩余=%s",
+                                self.account_id,
+                                symbol,
+                                filled,
+                                amt,
+                                remaining,
+                            )
+                            try:
+                                self.exchange.create_order(
+                                    symbol,
+                                    "market",
+                                    side,
+                                    float(self.exchange.amount_to_precision(symbol, remaining)),
+                                    None,
+                                    {"reduceOnly": True},
+                                )
+                            except Exception as e2:
+                                logger.error(
+                                    "移动止盈[%s] %s 补市价平剩余失败: %s",
+                                    self.account_id, symbol, e2,
+                                )
+                                return False
+                        else:
+                            return False
                     mode_txt = f"限价IOC(锚≈{sig:.8g})"
 
             logger.info(
@@ -719,22 +822,26 @@ class TrailingStopWorker:
 
         self._batch_tickers = None
         if self.use_last_price:
-            for _attempt_tk in (1, 2):
-                try:
-                    with self.trade_lock:
-                        all_tickers = self.exchange.fetch_tickers()
-                    self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
-                    break
-                except Exception as e:
-                    self._batch_tickers = None
-                    log_msg = (
-                        "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
-                        if _attempt_tk == 1
-                        else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
-                    )
-                    logger.warning(log_msg, self.account_id, e)
-                    if _attempt_tk == 1:
-                        time.sleep(0.2)
+            pf = getattr(self, "_price_feed_data", None)
+            if pf is not None and isinstance(pf, dict):
+                self._batch_tickers = pf
+            else:
+                for _attempt_tk in (1, 2):
+                    try:
+                        with self.price_lock:
+                            all_tickers = self.exchange.fetch_tickers()
+                        self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
+                        break
+                    except Exception as e:
+                        self._batch_tickers = None
+                        log_msg = (
+                            "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
+                            if _attempt_tk == 1
+                            else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
+                        )
+                        logger.warning(log_msg, self.account_id, e)
+                        if _attempt_tk == 1:
+                            time.sleep(0.2)
 
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
@@ -813,36 +920,31 @@ class TrailingStopWorker:
                 tier_ex_th = self._tier_profit_exit_threshold(
                     current_tier, highest_profit
                 )
-                if tier_ex_th is not None and profit_pct <= tier_ex_th + 1.0e-9:
-                    logger.info(
-                        "移动止盈[%s] %s 分档(交易所) 峰值回撤触发 "
-                        "profit=%.4f%% line=%.4f%% 档=%s 交由条件单执行",
-                        self.account_id,
-                        symbol,
-                        profit_pct,
-                        tier_ex_th,
-                        current_tier,
-                    )
-                    self._sync_trailing_stop_algo(
-                        symbol,
-                        side,
-                        entry_price,
-                        position_amt,
-                        current_tier,
-                        highest_profit,
-                        _profit_pct=profit_pct,
-                    )
-                    continue
-                elif tier_ex_th is not None:
-                    self._sync_trailing_stop_algo(
-                        symbol,
-                        side,
-                        entry_price,
-                        position_amt,
-                        current_tier,
-                        highest_profit,
-                        _profit_pct=profit_pct,
-                    )
+                if tier_ex_th is not None:
+                    tier_sig = f"{current_tier}|{tier_ex_th:.6f}"
+                    if tier_sig == self._last_tier_sig.get(symbol) and self._algo_trailing_id.get(symbol):
+                        pass
+                    else:
+                        self._last_tier_sig[symbol] = tier_sig
+                        if profit_pct <= tier_ex_th + 1.0e-9:
+                            logger.info(
+                                "移动止盈[%s] %s 分档(交易所) 峰值回撤触发 "
+                                "profit=%.4f%% line=%.4f%% 档=%s 交由条件单执行",
+                                self.account_id,
+                                symbol,
+                                profit_pct,
+                                tier_ex_th,
+                                current_tier,
+                            )
+                        self._sync_trailing_stop_algo(
+                            symbol,
+                            side,
+                            entry_price,
+                            position_amt,
+                            current_tier,
+                            highest_profit,
+                            _profit_pct=profit_pct,
+                        )
             elif current_tier == "低档保护止盈":
                 # 与交易所路径一致：仅按「峰值×回撤」与底线取 max，不再用当前浮盈贴价
                 low_eff = self._tier_profit_exit_threshold(
@@ -925,6 +1027,7 @@ class TrailingStopWorker:
                 self.current_tiers.pop(sym, None)
                 self.detected_positions.discard(sym)
                 self._last_trigger_tp_str.pop(sym, None)
+                self._last_tier_sig.pop(sym, None)
 
         self._batch_tickers = None
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"
@@ -961,6 +1064,20 @@ class TrailingStopWorker:
             price_mode_txt,
             ex_txt,
         )
+        if self.use_last_price:
+            self._price_feed_stop.clear()
+            self._price_feed_data = None
+            self._price_feed_thread = threading.Thread(
+                target=self._price_feed_loop,
+                args=(0.3,),
+                daemon=True,
+                name=f"price-{self.account_id}",
+            )
+            self._price_feed_thread.start()
+            logger.info(
+                "移动止盈[%s] 独立行情线程已启动（0.3s间隔）",
+                self.account_id,
+            )
         try:
             while not stop_event.is_set():
                 wait_sec = float(monitor_interval)
@@ -979,6 +1096,9 @@ class TrailingStopWorker:
                 if stop_event.wait(timeout=wait_sec):
                     break
         finally:
+            self._price_feed_stop.set()
+            if self._price_feed_thread and self._price_feed_thread.is_alive():
+                self._price_feed_thread.join(timeout=2)
             self._notify_worker_stop.set()
             self._notify_worker.join(timeout=3)
             if self.exchange_sync_stop:
