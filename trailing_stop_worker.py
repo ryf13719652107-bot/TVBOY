@@ -151,6 +151,11 @@ class TrailingStopWorker:
         self._price_feed_data: dict[str, Any] | None = None
         self._price_feed_data_ts: float = 0.0  # 修复：增加价格数据时间戳
 
+        # WebSocket 价格订阅
+        self._websocket_feed: Any | None = None
+        self._use_websocket = True  # 是否使用 WebSocket
+        self._subscribed_symbols: set[str] = set()
+
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
 
@@ -209,28 +214,130 @@ class TrailingStopWorker:
             )
             return False
 
+    def _start_websocket_feed(self, symbols: list[str]):
+        """启动 WebSocket 价格订阅"""
+        if not self._use_websocket:
+            return
+
+        try:
+            from websocket_price_feed import create_websocket_feed
+
+            exchange_id = getattr(self.exchange, "id", "")
+            self._websocket_feed = create_websocket_feed(
+                exchange_id=exchange_id,
+                symbols=symbols,
+                on_price_update=self._on_websocket_price_update,
+                testnet=False,
+            )
+
+            if self._websocket_feed:
+                self._websocket_feed.start()
+                self._subscribed_symbols = set(symbols)
+                logger.info(
+                    "移动止盈[%s] WebSocket 价格订阅已启动，订阅 %d 个币种",
+                    self.account_id,
+                    len(symbols)
+                )
+            else:
+                logger.warning(
+                    "移动止盈[%s] WebSocket 不支持该交易所: %s",
+                    self.account_id,
+                    exchange_id
+                )
+
+        except Exception as e:
+            logger.error(
+                "移动止盈[%s] 启动 WebSocket 失败: %s，将使用 REST API",
+                self.account_id,
+                e
+            )
+            self._websocket_feed = None
+
+    def _on_websocket_price_update(self, symbol: str, price_data: dict):
+        """WebSocket 价格更新回调"""
+        # 将 WebSocket 数据格式转换为与 fetch_tickers 一致
+        ticker_data = {}
+
+        if "last" in price_data:
+            ticker_data["last"] = price_data["last"]
+            ticker_data["close"] = price_data["last"]
+
+        if "mark" in price_data:
+            # 币安 WebSocket 不直接提供 mark，但我们可以存储
+            pass
+
+        if ticker_data:
+            with self.price_lock:
+                if self._price_feed_data is None:
+                    self._price_feed_data = {}
+                self._price_feed_data[symbol] = ticker_data
+                self._price_feed_data_ts = time.time()
+
+    def _stop_websocket_feed(self):
+        """停止 WebSocket 价格订阅"""
+        if self._websocket_feed:
+            try:
+                self._websocket_feed.stop()
+                logger.info(
+                    "移动止盈[%s] WebSocket 价格订阅已停止",
+                    self.account_id
+                )
+            except Exception as e:
+                logger.error(
+                    "移动止盈[%s] 停止 WebSocket 失败: %s",
+                    self.account_id,
+                    e
+                )
+            finally:
+                self._websocket_feed = None
+                self._subscribed_symbols = set()
+
+    def _update_websocket_symbols(self, symbols: list[str]):
+        """更新 WebSocket 订阅的币种列表"""
+        if not self._use_websocket or not self._websocket_feed:
+            return
+
+        current_symbols = set(symbols)
+        if current_symbols != self._subscribed_symbols:
+            # 币种列表变化，需要重新订阅
+            logger.info(
+                "移动止盈[%s] 持仓币种变化，重新订阅 WebSocket",
+                self.account_id
+            )
+            self._stop_websocket_feed()
+            self._start_websocket_feed(list(current_symbols))
+
     def _price_feed_loop(self, interval: float) -> None:
         """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
-        优化：支持更短间隔，增加错误处理和连接保活，增加时间戳"""
+        优化：支持更短间隔，增加错误处理和连接保活，增加时间戳
+        注意：如果启用了 WebSocket，此线程作为备用"""
         consecutive_errors = 0
         while not self._price_feed_stop.is_set():
             start_time = time.time()
+
+            # 如果 WebSocket 已连接且正常工作，减少 REST API 调用频率
+            if self._websocket_feed and self._websocket_feed.is_connected():
+                # WebSocket 正常，每5秒检查一次作为备用
+                if self._price_feed_stop.wait(timeout=5.0):
+                    break
+                continue
+
             try:
-                # 优化：减少锁持有时间，先获取数据再更新
+                # WebSocket 未连接或失败，使用 REST API
                 tickers = self.exchange.fetch_tickers()
                 if isinstance(tickers, dict):
                     with self.price_lock:
                         self._price_feed_data = tickers
-                        self._price_feed_data_ts = time.time()  # 修复：增加时间戳
-                    consecutive_errors = 0  # 成功重置错误计数
+                        self._price_feed_data_ts = time.time()
+                    consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors <= 3:  # 只记录前3次错误，避免日志刷屏
+                if consecutive_errors <= 3:
                     logger.warning(
                         "移动止盈[%s] 价格推送获取失败(%d次): %s",
                         self.account_id, consecutive_errors, e
                     )
-            # 优化：精确控制间隔，扣除请求耗时
+
             elapsed = time.time() - start_time
             sleep_time = max(0, interval - elapsed)
             if self._price_feed_stop.wait(timeout=sleep_time):
@@ -822,6 +929,10 @@ class TrailingStopWorker:
             sym, q, _, _, sd = _parse_position_row(position)
             if sym and q > 0 and sd in ("long", "short"):
                 active_syms.add(sym)
+
+        # 更新 WebSocket 订阅币种
+        self._update_websocket_symbols(list(active_syms))
+
         if self.exchange_sync_stop:
             for sym in list(self._algo_trailing_id.keys()):
                 if sym not in active_syms:
@@ -838,36 +949,61 @@ class TrailingStopWorker:
         use_ex = self.exchange_sync_stop and self._sync_algo_supported()
 
         self._batch_tickers = None
-        self._batch_tickers_ts = 0.0  # 增加时间戳记录
+        self._batch_tickers_ts = 0.0
+
         if self.use_last_price:
-            pf = getattr(self, "_price_feed_data", None)
-            pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
-            current_ts = time.time()
-            # 修复：检查数据是否过期（超过2秒视为过期）
-            if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 2.0:
-                self._batch_tickers = pf.copy()  # 修复：使用拷贝而非引用
-                self._batch_tickers_ts = pf_ts
-            else:
-                # 数据过期或不存在，实时获取
-                for _attempt_tk in (1, 2):
-                    try:
-                        with self.price_lock:
-                            all_tickers = self.exchange.fetch_tickers()
-                        if isinstance(all_tickers, dict):
-                            self._batch_tickers = all_tickers.copy()  # 修复：使用拷贝
-                            self._batch_tickers_ts = time.time()
-                        break
-                    except Exception as e:
-                        self._batch_tickers = None
-                        self._batch_tickers_ts = 0.0
-                        log_msg = (
-                            "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
-                            if _attempt_tk == 1
-                            else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
-                        )
-                        logger.warning(log_msg, self.account_id, e)
-                        if _attempt_tk == 1:
-                            time.sleep(0.2)
+            # 优先使用 WebSocket 数据
+            ws_data_available = False
+            if self._websocket_feed and self._websocket_feed.is_connected():
+                # WebSocket 已连接，直接使用其数据
+                ws_prices = {}
+                for sym in active_syms:
+                    price_data = self._websocket_feed.get_price(sym)
+                    if price_data and "last" in price_data:
+                        ws_prices[sym] = {
+                            "last": price_data["last"],
+                            "close": price_data["last"],
+                        }
+                if ws_prices:
+                    self._batch_tickers = ws_prices
+                    self._batch_tickers_ts = time.time()
+                    ws_data_available = True
+                    logger.debug(
+                        "移动止盈[%s] 使用 WebSocket 价格数据，%d 个币种",
+                        self.account_id,
+                        len(ws_prices)
+                    )
+
+            # WebSocket 不可用，使用缓存或 REST API
+            if not ws_data_available:
+                pf = getattr(self, "_price_feed_data", None)
+                pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
+                current_ts = time.time()
+
+                if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 2.0:
+                    self._batch_tickers = pf.copy()
+                    self._batch_tickers_ts = pf_ts
+                else:
+                    # 数据过期或不存在，实时获取
+                    for _attempt_tk in (1, 2):
+                        try:
+                            with self.price_lock:
+                                all_tickers = self.exchange.fetch_tickers()
+                            if isinstance(all_tickers, dict):
+                                self._batch_tickers = all_tickers.copy()
+                                self._batch_tickers_ts = time.time()
+                            break
+                        except Exception as e:
+                            self._batch_tickers = None
+                            self._batch_tickers_ts = 0.0
+                            log_msg = (
+                                "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
+                                if _attempt_tk == 1
+                                else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
+                            )
+                            logger.warning(log_msg, self.account_id, e)
+                            if _attempt_tk == 1:
+                                time.sleep(0.2)
 
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
@@ -930,18 +1066,23 @@ class TrailingStopWorker:
 
             # 修复：增加价格数据时间戳和来源信息，便于调试
             data_age = time.time() - self._batch_tickers_ts if self._batch_tickers_ts > 0 else -1
+
+            # 显示数据来源：WebSocket 或 REST
+            ws_connected = self._websocket_feed and self._websocket_feed.is_connected()
+            source_tag = "WS" if ws_connected else "REST"
+
             if self.use_last_price and abs(p_from_last - p_from_mark) > 0.01:
                 line = (
                     f"{symbol} {side}({px_tag}) 浮盈(决)={profit_pct:.2f}% "
                     f"标={p_from_mark:.2f}% 新={p_from_last:.2f}% "
                     f"最高={highest_profit:.2f}% 档={current_tier} "
-                    f"[数据延迟{data_age:.2f}s]"
+                    f"[{source_tag}延迟{data_age:.2f}s]"
                 )
             else:
                 line = (
                     f"{symbol} {side}({px_tag}) 浮盈={profit_pct:.2f}% "
                     f"最高={highest_profit:.2f}% 档={current_tier} "
-                    f"[数据延迟{data_age:.2f}s]"
+                    f"[{source_tag}延迟{data_age:.2f}s]"
                 )
             lines.append(line)
             logger.info("移动止盈[%s] %s", self.account_id, line)
