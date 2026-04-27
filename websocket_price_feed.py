@@ -56,7 +56,6 @@ class BinanceWebSocketPriceFeed:
         self._prices_lock = threading.Lock()
 
         # WebSocket 连接
-        self._ws = None
         self._connected = False
         self._connected_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -79,10 +78,9 @@ class BinanceWebSocketPriceFeed:
             else "wss://fstream.binance.com"
         )
         # 使用 markPrice 流（每 3 秒强制推送，不依赖交易活动）
-        # 币安格式：bsbusdt@markPrice（小写，不带:usdt后缀）
         streams = []
         for sym in self.symbols:
-            lower = sym.lower().replace('/usdt', '').replace(':usdt', '').replace('/usd', '').replace(':usd', '')
+            lower = sym.lower()
             streams.append(f"{lower}@markPrice")
         return f"{base_url}/stream?streams={'/'.join(streams)}"
 
@@ -261,8 +259,6 @@ class BinanceWebSocketPriceFeed:
                         consecutive_failures
                     )
                     consecutive_failures = 0
-                else:
-                    consecutive_failures = 0
             except Exception as e:
                 logger.error("[Binance WebSocket] 事件循环错误: %s", e)
 
@@ -340,7 +336,7 @@ class BinanceWebSocketPriceFeed:
         age = time.time() - received_at
 
         if age > max_age_sec:
-            logger.warning(f"[Binance WebSocket] {symbol} 数据过期: {age:.2f}s")
+            logger.warning("[Binance WebSocket] %s 数据过期: %.2fs", symbol, age)
             return None
 
         return data
@@ -352,6 +348,8 @@ class BinanceWebSocketPriceFeed:
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
+        with self._prices_lock:
+            prices_snapshot = dict(self._prices)
         recent_disconnects = []
         for ts, reason in self._disconnect_timestamps[-5:]:
             recent_disconnects.append({
@@ -367,10 +365,10 @@ class BinanceWebSocketPriceFeed:
             "last_disconnect_reason": self._last_disconnect_reason,
             "last_connected_ago": round(time.time() - self._last_connected_time, 1) if self._last_connected_time > 0 else -1,
             "recent_disconnects": recent_disconnects,
-            "prices_cached": len(self._prices),
+            "prices_cached": len(prices_snapshot),
             "prices_age": {
                 sym: round(time.time() - d.get("received_at", 0), 1)
-                for sym, d in list(self._prices.items())[:5]
+                for sym, d in list(prices_snapshot.items())[:5]
             },
         }
 
@@ -409,7 +407,6 @@ class OKXWebSocketPriceFeed:
         self._prices_lock = threading.Lock()
 
         # WebSocket 连接
-        self._ws = None
         self._connected = False
         self._connected_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -451,8 +448,8 @@ class OKXWebSocketPriceFeed:
         """发送 ping 保持连接（OKX 要求客户端发送 ping）"""
         try:
             await ws.send("ping")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("[OKX WebSocket] ping 发送失败: %s", e)
 
     async def _connect_and_listen(self):
         """连接并监听，手动管理连接生命周期"""
@@ -641,8 +638,6 @@ class OKXWebSocketPriceFeed:
                         consecutive_failures
                     )
                     consecutive_failures = 0
-                else:
-                    consecutive_failures = 0
             except Exception as e:
                 logger.error("[OKX WebSocket] 事件循环错误: %s", e)
 
@@ -725,6 +720,8 @@ class OKXWebSocketPriceFeed:
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
+        with self._prices_lock:
+            prices_snapshot = dict(self._prices)
         recent_disconnects = []
         for ts, reason in self._disconnect_timestamps[-5:]:
             recent_disconnects.append({
@@ -740,10 +737,10 @@ class OKXWebSocketPriceFeed:
             "last_disconnect_reason": self._last_disconnect_reason,
             "last_connected_ago": round(time.time() - self._last_connected_time, 1) if self._last_connected_time > 0 else -1,
             "recent_disconnects": recent_disconnects,
-            "prices_cached": len(self._prices),
+            "prices_cached": len(prices_snapshot),
             "prices_age": {
                 sym: round(time.time() - d.get("received_at", 0), 1)
-                for sym, d in list(self._prices.items())[:5]
+                for sym, d in list(prices_snapshot.items())[:5]
             },
         }
 
