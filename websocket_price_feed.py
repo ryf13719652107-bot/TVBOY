@@ -64,16 +64,20 @@ class BinanceWebSocketPriceFeed:
     def _parse_single_message(self, stream_type: str, data: dict) -> dict[str, Any] | None:
         """解析单条 stream 消息"""
         result: dict[str, Any] = {}
-        
+
         try:
             if stream_type == "aggTrade":
                 result["last"] = float(data.get("p", 0))
                 result["trade_time"] = data.get("T", 0)
             elif stream_type == "markPrice":
+                # markPrice 每 3 秒推送一次，作为 aggTrade 的补充
+                # 当币种无交易时，markPrice 仍能提供最新标记价格
                 result["mark"] = float(data.get("p", 0))
                 result["index"] = float(data.get("i", 0))
                 result["funding_rate"] = float(data.get("r", 0))
                 result["next_funding_time"] = data.get("T", 0)
+                # 将 mark 价同时作为 last 的备选，确保无交易时仍有价格数据
+                result["last"] = result["mark"]
             return result if result else None
         except (ValueError, TypeError) as e:
             logger.error(f"[WebSocket] 价格解析错误: {e}")
@@ -223,7 +227,16 @@ class BinanceWebSocketPriceFeed:
         """
         symbol = symbol.upper().replace('/USDT', 'USDT')
         with self._prices_lock:
-            return self._prices.get(symbol, {}).copy() if symbol in self._prices else None
+            data = self._prices.get(symbol, {}).copy() if symbol in self._prices else None
+            # 诊断日志：检查数据是否存在及新鲜度
+            if data:
+                age = time.time() - data.get("received_at", 0)
+                if age > 5.0:
+                    logger.warning(
+                        "[WebSocket] %s 数据过期: %.1fs (连接=%s, 消息数=%d)",
+                        symbol, age, self._connected, self._message_count
+                    )
+            return data
 
     def get_price_with_age(self, symbol: str, max_age_sec: float = 1.0) -> dict[str, Any] | None:
         """

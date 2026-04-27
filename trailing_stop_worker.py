@@ -265,8 +265,9 @@ class TrailingStopWorker:
             ticker_data["close"] = price_data["last"]
 
         if "mark" in price_data:
-            # 币安 WebSocket 不直接提供 mark，但我们可以存储
-            pass
+            # 币安 WebSocket markPrice 流提供标记价格
+            # 用于计算浮盈和触发移动止盈
+            ticker_data["mark"] = price_data["mark"]
 
         if ticker_data:
             with self.price_lock:
@@ -983,11 +984,15 @@ class TrailingStopWorker:
                 ws_prices = {}
                 for sym in active_syms:
                     price_data = self._websocket_feed.get_price(sym)
-                    if price_data and "last" in price_data:
-                        ws_prices[sym] = {
-                            "last": price_data["last"],
-                            "close": price_data["last"],
-                        }
+                    if price_data:
+                        # 优先使用 last（成交价格），备选 mark（标记价格）
+                        # 币安：markPrice 每 3 秒推送，确保低流动性币种也有数据
+                        price = price_data.get("last") or price_data.get("mark")
+                        if price:
+                            ws_prices[sym] = {
+                                "last": price,
+                                "close": price,
+                            }
                 if ws_prices:
                     self._batch_tickers = ws_prices
                     self._batch_tickers_ts = time.time()
