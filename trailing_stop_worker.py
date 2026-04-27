@@ -209,16 +209,30 @@ class TrailingStopWorker:
             return False
 
     def _price_feed_loop(self, interval: float) -> None:
-        """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。"""
+        """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
+        优化：支持更短间隔，增加错误处理和连接保活"""
+        consecutive_errors = 0
         while not self._price_feed_stop.is_set():
+            start_time = time.time()
             try:
-                with self.price_lock:
-                    tickers = self.exchange.fetch_tickers()
+                # 优化：减少锁持有时间，先获取数据再更新
+                tickers = self.exchange.fetch_tickers()
                 if isinstance(tickers, dict):
-                    self._price_feed_data = tickers
-            except Exception:
-                pass
-            self._price_feed_stop.wait(timeout=interval)
+                    with self.price_lock:
+                        self._price_feed_data = tickers
+                    consecutive_errors = 0  # 成功重置错误计数
+            except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors <= 3:  # 只记录前3次错误，避免日志刷屏
+                    logger.warning(
+                        "移动止盈[%s] 价格推送获取失败(%d次): %s",
+                        self.account_id, consecutive_errors, e
+                    )
+            # 优化：精确控制间隔，扣除请求耗时
+            elapsed = time.time() - start_time
+            sleep_time = max(0, interval - elapsed)
+            if self._price_feed_stop.wait(timeout=sleep_time):
+                break
 
     def restore_existing_algos(self) -> None:
         """启动时扫描交易所已有条件单，恢复 _algo_trailing_id，避免重启后重复挂单。"""
@@ -570,17 +584,18 @@ class TrailingStopWorker:
             )
 
     def fetch_positions(self) -> list[dict[str, Any]]:
+        """获取持仓，优化：移除 price_lock 依赖，减少延迟"""
         for attempt in (1, 2):
             try:
-                with self.price_lock:
-                    return self.exchange.fetch_positions()
+                # 优化：持仓获取不需要 price_lock，与价格获取并行
+                return self.exchange.fetch_positions()
             except Exception as e:
                 if attempt == 1:
                     logger.warning(
-                        "移动止盈[%s] 获取持仓失败(%s)，200ms后重试",
+                        "移动止盈[%s] 获取持仓失败(%s)，100ms后重试",
                         self.account_id, e,
                     )
-                    time.sleep(0.2)
+                    time.sleep(0.1)  # 优化：减少重试等待时间
                 else:
                     logger.error(
                         "移动止盈[%s] 重试获取持仓仍失败: %s",
@@ -1067,16 +1082,18 @@ class TrailingStopWorker:
         if self.use_last_price:
             self._price_feed_stop.clear()
             self._price_feed_data = None
+            # 优化：价格推送间隔从 0.3s 降至 0.1s，提高价格更新频率
+            price_feed_interval = min(0.1, monitor_interval / 3)
             self._price_feed_thread = threading.Thread(
                 target=self._price_feed_loop,
-                args=(0.3,),
+                args=(price_feed_interval,),
                 daemon=True,
                 name=f"price-{self.account_id}",
             )
             self._price_feed_thread.start()
             logger.info(
-                "移动止盈[%s] 独立行情线程已启动（0.3s间隔）",
-                self.account_id,
+                "移动止盈[%s] 独立行情线程已启动（%.3fs间隔）",
+                self.account_id, price_feed_interval,
             )
         try:
             while not stop_event.is_set():
