@@ -937,12 +937,14 @@ class TrailingStopWorker:
         执行一轮监控。返回 True 表示账户上存在可识别的持仓（含黑名单持仓），
         下一轮应使用「有仓」监控间隔；否则为 False，使用空仓轮询间隔。
         """
+        _monitor_start = time.time()
         try:
             positions = self.fetch_positions()
         except Exception as e:
+            elapsed = time.time() - _monitor_start
             logger.warning(
-                "移动止盈[%s] 获取持仓连续失败，跳过本轮: %s",
-                self.account_id, e,
+                "移动止盈[%s] 获取持仓连续失败，跳过本轮(耗时%.1fs): %s",
+                self.account_id, elapsed, e,
             )
             return True  # True → 保持高频重试
 
@@ -1226,6 +1228,12 @@ class TrailingStopWorker:
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"
         if len(lines) > 12:
             summary += f" …共{len(lines)}个"
+        _elapsed = time.time() - _monitor_start
+        if _elapsed >= 0.1:
+            logger.info(
+                "移动止盈[%s] 监控完成 耗时=%.1fs 持仓=%d",
+                self.account_id, round(_elapsed, 1), len(active_syms),
+            )
         self._set_status(summary)
         return has_open_for_interval
 
@@ -1275,6 +1283,7 @@ class TrailingStopWorker:
             # WebSocket 会在首次有持仓时自动启动
         try:
             while not stop_event.is_set():
+                _cycle_start = time.time()
                 wait_sec = float(monitor_interval)
                 try:
                     has_open = self.monitor_positions_once()
@@ -1288,6 +1297,12 @@ class TrailingStopWorker:
                     logger.exception("移动止盈[%s] %s", self.account_id, err)
                     self._set_status(err)
                     self.send_feishu_notification(f"[移动止盈] {err}")
+                _cycle_elapsed = time.time() - _cycle_start
+                if _cycle_elapsed >= 0.1:
+                    logger.info(
+                        "移动止盈[%s] 循环耗时=%.1fs(监控+等待) 下一轮等待=%.1fs",
+                        self.account_id, round(_cycle_elapsed, 1), wait_sec,
+                    )
                 if stop_event.wait(timeout=wait_sec):
                     break
         finally:
