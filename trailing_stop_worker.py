@@ -992,15 +992,23 @@ class TrailingStopWorker:
                             ws_prices[sym] = {
                                 "last": price,
                                 "close": price,
+                                "mark": price_data.get("mark", price),
                             }
                 if ws_prices:
                     self._batch_tickers = ws_prices
                     self._batch_tickers_ts = time.time()
                     ws_data_available = True
-                    logger.debug(
+                    logger.info(
                         "移动止盈[%s] 使用 WebSocket 价格数据，%d 个币种",
                         self.account_id,
                         len(ws_prices)
+                    )
+                else:
+                    # WebSocket 连接正常但没有价格数据，记录诊断信息
+                    stats = self._websocket_feed.get_stats()
+                    logger.warning(
+                        "移动止盈[%s] WebSocket 连接正常但无价格数据: %s",
+                        self.account_id, stats
                     )
 
             # WebSocket 不可用，使用缓存或 REST API
@@ -1009,7 +1017,7 @@ class TrailingStopWorker:
                 pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
                 current_ts = time.time()
 
-                if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 2.0:
+                if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 5.0:
                     self._batch_tickers = pf.copy()
                     self._batch_tickers_ts = pf_ts
                 else:
@@ -1100,7 +1108,7 @@ class TrailingStopWorker:
             ws_connected = self._websocket_feed and self._websocket_feed.is_connected()
             source_tag = "WS" if ws_connected else "REST"
 
-            if self.use_last_price and abs(p_from_last - p_from_mark) > 0.01:
+            if self.use_last_price:
                 line = (
                     f"{symbol} {side}({px_tag}) 浮盈(决)={profit_pct:.2f}% "
                     f"标={p_from_mark:.2f}% 新={p_from_last:.2f}% "
