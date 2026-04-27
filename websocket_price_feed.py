@@ -47,6 +47,7 @@ class BinanceWebSocketPriceFeed:
         # WebSocket 连接
         self._ws = None
         self._connected = False
+        self._connected_lock = threading.Lock()  # 保护 _connected 状态
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -135,22 +136,36 @@ class BinanceWebSocketPriceFeed:
 
     async def _run_all_subscriptions(self):
         """运行所有订阅"""
-        tasks = []
+        if not self.symbols:
+            logger.warning("[WebSocket] 没有订阅任何币种，等待 5 秒后重试")
+            await asyncio.sleep(5)
+            return
         
+        tasks = []
         for symbol in self.symbols:
             # 为每个币种创建两个任务：aggTrade 和 markPrice
             tasks.append(self._subscribe_single(symbol, "aggTrade"))
             tasks.append(self._subscribe_single(symbol, "markPrice"))
         
-        # 同时运行所有订阅
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # 同时运行所有订阅，处理异常
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 检查异常结果
+        error_count = sum(1 for r in results if isinstance(r, Exception))
+        if error_count > 0:
+            logger.warning(f"[WebSocket] {error_count}/{len(results)} 个订阅发生错误")
 
     def _run_loop(self):
         """在线程中运行事件循环"""
         while not self._stop_event.is_set():
             try:
-                self._connected = True
+                with self._connected_lock:
+                    self._connected = True
                 asyncio.run(self._run_all_subscriptions())
+                # 正常完成（无异常），重置重连计数器
+                if self._reconnect_count > 0:
+                    logger.info("[WebSocket] 连接恢复正常，重置重连计数器")
+                    self._reconnect_count = 0
             except Exception as e:
                 logger.error(f"[WebSocket] 事件循环错误: {e}")
 
@@ -158,7 +173,8 @@ class BinanceWebSocketPriceFeed:
                 break
 
             # 重连
-            self._connected = False
+            with self._connected_lock:
+                self._connected = False
             self._reconnect_count += 1
             wait_time = min(5 + self._reconnect_count * 2, 30)
             logger.info(f"[WebSocket] {wait_time}秒后重连... (第{self._reconnect_count}次)")
@@ -215,8 +231,9 @@ class BinanceWebSocketPriceFeed:
         return data
 
     def is_connected(self) -> bool:
-        """检查连接状态"""
-        return self._connected
+        """检查连接状态（线程安全）"""
+        with self._connected_lock:
+            return self._connected
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
@@ -283,50 +300,49 @@ class OKXWebSocketPriceFeed:
                 async for message in ws:
                     if self._stop_event.is_set():
                         break
-                    await self._handle_message(message)
 
+                    try:
+                        data = json.loads(message)
+
+                        # 处理推送数据
+                        if "data" in data:
+                            for item in data["data"]:
+                                inst_id = item.get("instId", "").replace("-SWAP", "")
+                                if inst_id:
+                                    price_data = {
+                                        "last": float(item.get("last", 0)),
+                                        "mark": float(item.get("markPx", 0)),
+                                        "index": float(item.get("idxPx", 0)),
+                                        "received_at": time.time(),
+                                    }
+                                    with self._prices_lock:
+                                        self._prices[inst_id] = price_data
+
+                                    if self.on_price_update:
+                                        try:
+                                            self.on_price_update(inst_id, price_data)
+                                        except Exception as e:
+                                            logger.error(f"[OKX WebSocket] 回调错误: {e}")
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"[OKX WebSocket] JSON解析错误: {e}")
+                    except Exception as e:
+                        logger.error(f"[OKX WebSocket] 消息处理错误: {e}")
+
+        except ConnectionClosedOK:
+            logger.info("[OKX WebSocket] 正常关闭")
+        except ConnectionClosed as e:
+            logger.warning(f"[OKX WebSocket] 连接断开: {e}")
         except Exception as e:
             logger.error(f"[OKX WebSocket] 错误: {e}")
-        finally:
-            self._connected = False
-
-    async def _handle_message(self, message: str):
-        """处理消息"""
-        try:
-            data = json.loads(message)
-            event = data.get("event", "")
-
-            if event == "subscribe":
-                logger.info(f"[OKX WebSocket] 订阅成功: {data}")
-                return
-
-            if "data" in data:
-                for item in data.get("data", []):
-                    inst_id = item.get("instId", "")  # BSB-USDT-SWAP
-                    symbol = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-
-                    price_data = {
-                        "last": float(item.get("last", 0)),
-                        "mark": float(item.get("markPx", 0)),
-                        "received_at": time.time(),
-                    }
-
-                    with self._prices_lock:
-                        self._prices[symbol] = price_data
-
-                    if self.on_price_update:
-                        self.on_price_update(symbol, price_data)
-
-        except Exception as e:
-            logger.error(f"[OKX WebSocket] 处理错误: {e}")
 
     def _run_loop(self):
-        """运行事件循环"""
+        """运行循环"""
         while not self._stop_event.is_set():
             try:
                 asyncio.run(self._connect_and_listen())
             except Exception as e:
-                logger.error(f"[OKX WebSocket] 循环错误: {e}")
+                logger.error(f"[OKX WebSocket] 事件循环错误: {e}")
 
             if self._stop_event.is_set():
                 break

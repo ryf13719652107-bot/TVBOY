@@ -294,18 +294,37 @@ class TrailingStopWorker:
 
     def _update_websocket_symbols(self, symbols: list[str]):
         """更新 WebSocket 订阅的币种列表"""
-        if not self._use_websocket or not self._websocket_feed:
+        if not self._use_websocket:
             return
 
         current_symbols = set(symbols)
-        if current_symbols != self._subscribed_symbols:
-            # 币种列表变化，需要重新订阅
+
+        # 首次有持仓，启动 WebSocket
+        if not self._websocket_feed and current_symbols:
+            logger.info(
+                "移动止盈[%s] 首次检测到持仓，启动 WebSocket",
+                self.account_id
+            )
+            self._start_websocket_feed(list(current_symbols))
+            return
+
+        # WebSocket 已启动，检查币种变化
+        if self._websocket_feed and current_symbols != self._subscribed_symbols:
+            # 清理不再持仓的币种数据，防止内存泄漏
+            removed_symbols = self._subscribed_symbols - current_symbols
+            for sym in removed_symbols:
+                self.highest_profits.pop(sym, None)
+                self.current_tiers.pop(sym, None)
+                self.detected_positions.discard(sym)
+                logger.info("移动止盈[%s] 清理已平仓币种数据: %s", self.account_id, sym)
+            
             logger.info(
                 "移动止盈[%s] 持仓币种变化，重新订阅 WebSocket",
                 self.account_id
             )
             self._stop_websocket_feed()
-            self._start_websocket_feed(list(current_symbols))
+            if current_symbols:  # 只有还有持仓才重新订阅
+                self._start_websocket_feed(list(current_symbols))
 
     def _price_feed_loop(self, interval: float) -> None:
         """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
@@ -1251,6 +1270,7 @@ class TrailingStopWorker:
                 "移动止盈[%s] 独立行情线程已启动（%.3fs间隔）",
                 self.account_id, price_feed_interval,
             )
+            # WebSocket 会在首次有持仓时自动启动
         try:
             while not stop_event.is_set():
                 wait_sec = float(monitor_interval)
