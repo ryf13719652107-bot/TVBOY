@@ -149,6 +149,7 @@ class TrailingStopWorker:
         self._price_feed_stop = threading.Event()
         self._price_feed_thread: threading.Thread | None = None
         self._price_feed_data: dict[str, Any] | None = None
+        self._price_feed_data_ts: float = 0.0  # 修复：增加价格数据时间戳
 
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
@@ -210,7 +211,7 @@ class TrailingStopWorker:
 
     def _price_feed_loop(self, interval: float) -> None:
         """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
-        优化：支持更短间隔，增加错误处理和连接保活"""
+        优化：支持更短间隔，增加错误处理和连接保活，增加时间戳"""
         consecutive_errors = 0
         while not self._price_feed_stop.is_set():
             start_time = time.time()
@@ -220,6 +221,7 @@ class TrailingStopWorker:
                 if isinstance(tickers, dict):
                     with self.price_lock:
                         self._price_feed_data = tickers
+                        self._price_feed_data_ts = time.time()  # 修复：增加时间戳
                     consecutive_errors = 0  # 成功重置错误计数
             except Exception as e:
                 consecutive_errors += 1
@@ -836,19 +838,28 @@ class TrailingStopWorker:
         use_ex = self.exchange_sync_stop and self._sync_algo_supported()
 
         self._batch_tickers = None
+        self._batch_tickers_ts = 0.0  # 增加时间戳记录
         if self.use_last_price:
             pf = getattr(self, "_price_feed_data", None)
-            if pf is not None and isinstance(pf, dict):
-                self._batch_tickers = pf
+            pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
+            current_ts = time.time()
+            # 修复：检查数据是否过期（超过2秒视为过期）
+            if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 2.0:
+                self._batch_tickers = pf.copy()  # 修复：使用拷贝而非引用
+                self._batch_tickers_ts = pf_ts
             else:
+                # 数据过期或不存在，实时获取
                 for _attempt_tk in (1, 2):
                     try:
                         with self.price_lock:
                             all_tickers = self.exchange.fetch_tickers()
-                        self._batch_tickers = all_tickers if isinstance(all_tickers, dict) else None
+                        if isinstance(all_tickers, dict):
+                            self._batch_tickers = all_tickers.copy()  # 修复：使用拷贝
+                            self._batch_tickers_ts = time.time()
                         break
                     except Exception as e:
                         self._batch_tickers = None
+                        self._batch_tickers_ts = 0.0
                         log_msg = (
                             "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
                             if _attempt_tk == 1
@@ -917,16 +928,20 @@ class TrailingStopWorker:
                 current_tier = "无"
             self.current_tiers[symbol] = current_tier
 
+            # 修复：增加价格数据时间戳和来源信息，便于调试
+            data_age = time.time() - self._batch_tickers_ts if self._batch_tickers_ts > 0 else -1
             if self.use_last_price and abs(p_from_last - p_from_mark) > 0.01:
                 line = (
                     f"{symbol} {side}({px_tag}) 浮盈(决)={profit_pct:.2f}% "
                     f"标={p_from_mark:.2f}% 新={p_from_last:.2f}% "
-                    f"最高={highest_profit:.2f}% 档={current_tier}"
+                    f"最高={highest_profit:.2f}% 档={current_tier} "
+                    f"[数据延迟{data_age:.2f}s]"
                 )
             else:
                 line = (
                     f"{symbol} {side}({px_tag}) 浮盈={profit_pct:.2f}% "
-                    f"最高={highest_profit:.2f}% 档={current_tier}"
+                    f"最高={highest_profit:.2f}% 档={current_tier} "
+                    f"[数据延迟{data_age:.2f}s]"
                 )
             lines.append(line)
             logger.info("移动止盈[%s] %s", self.account_id, line)
