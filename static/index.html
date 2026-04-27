@@ -607,7 +607,7 @@
       <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
       <button type="button" class="tab-btn" data-tab="accounts" role="tab" aria-selected="false">交易账户</button>
       <button type="button" class="tab-btn" data-tab="trailing" role="tab" aria-selected="false">移动止盈</button>
-      <button type="button" class="tab-btn" data-tab="balance" role="tab" aria-selected="false">余额</button>
+      <button type="button" class="tab-btn" data-tab="account" role="tab" aria-selected="false">账户信息</button>
       <button type="button" class="tab-btn" data-tab="logs" role="tab" aria-selected="false">运行日志</button>
       <button type="button" class="tab-btn" data-tab="trades" role="tab" aria-selected="false">交易记录</button>
       <button type="button" class="tab-btn" data-tab="tv" role="tab" aria-selected="false">TradingView</button>
@@ -796,26 +796,54 @@
     </div>
     </div>
 
-    <div id="panel-balance" class="tab-panel" role="tabpanel">
+    <div id="panel-account" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">稳定币余额 <span class="help-tip" tabindex="0" data-tip="可查看全部账户或单账户余额。Binance 常见 USDT，Hyperliquid 常见 USDC。进入本页或切换账户会自动刷新。">?</span></h2>
+      <h2 class="title-line">余额 <span class="help-tip" tabindex="0" data-tip="可查看全部账户或单账户余额（U 本位合约与现货钱包）。选「全部账户」展示每个账户摘要，选单账户展示详细合约/现货余额。">?</span></h2>
       <div class="row" style="margin-bottom: 0.65rem;">
         <div>
-          <label for="accountSelectBalance">账户</label>
-          <select id="accountSelectBalance">
+          <label for="accountSelectAccount">账户</label>
+          <select id="accountSelectAccount">
             <option value="">全部账户</option>
           </select>
         </div>
+        <div style="display: flex; align-items: flex-end;">
+          <button type="button" id="btnRefreshAccount" disabled>刷新</button>
+        </div>
       </div>
-      <button type="button" id="btnBalance" disabled>刷新余额</button>
-      <div id="balancePlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
-      <p style="margin: 0.5rem 0 0; display: none;" id="balanceToggleWrap">
-        <button type="button" class="btn-link" id="btnToggleRawJson">显示原始 JSON</button>
+      <div id="accBalancePlain" class="balance-plain" style="display: none;" role="status" aria-live="polite"></div>
+      <p style="margin: 0.5rem 0 0; display: none;" id="accBalanceToggleWrap">
+        <button type="button" class="btn-link" id="accBtnToggleRawJson">显示原始 JSON</button>
       </p>
-      <p class="balance-raw-title" id="balanceRawTitle" style="display: none;">接口原始 JSON</p>
-      <div id="outBalance" class="out" style="display: none;"></div>
+      <p class="balance-raw-title" id="accBalanceRawTitle" style="display: none;">接口原始 JSON</p>
+      <div id="accOutBalance" class="out" style="display: none;"></div>
     </div>
 
+    <div class="card" style="margin-bottom: 1rem;">
+      <h2 class="title-line">当前持仓 <span class="help-tip" tabindex="0" data-tip="显示各交易账户当前所有持仓：币种、方向、数量、开仓价、标记价、浮盈百分比与浮盈金额。实时数据。">?</span></h2>
+      <div id="accPositionsBox" class="balance-plain" style="margin-top:0.5rem;">
+        <span style="color:var(--muted);">加载中…</span>
+      </div>
+      <div id="accPositionsTableWrap" class="table-wrap" style="margin-top:0.5rem; max-height: 70vh;">
+        <table class="siglog" aria-label="持仓列表" style="font-size:0.8rem;">
+          <thead>
+            <tr>
+              <th>账户</th>
+              <th>币种</th>
+              <th>方向</th>
+              <th style="text-align:right;">数量</th>
+              <th style="text-align:right;">开仓价</th>
+              <th style="text-align:right;">标记价</th>
+              <th style="text-align:right;">浮盈 %</th>
+              <th style="text-align:right;">浮盈 USDT</th>
+            </tr>
+          </thead>
+          <tbody id="accPositionsTbody">
+            <tr><td colspan="8" style="text-align:center;color:var(--muted);">加载中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" id="accPositionsHint">数据来自交易所实时接口，切换账户或点击刷新按钮更新。</p>
+    </div>
     </div>
 
     <div id="panel-logs" class="tab-panel" role="tabpanel">
@@ -1056,7 +1084,7 @@
     const TRAIL_PRESETS_LS = "tv_binance_trailing_presets";
     const secretEl = document.getElementById("secret");
     const statusBox = document.getElementById("statusBox");
-    const btnBalance = document.getElementById("btnBalance");
+    const btnRefreshAccount = document.getElementById("btnRefreshAccount");
     const btnWebhookTest = document.getElementById("btnWebhookTest");
     const btnAccountLog = document.getElementById("btnAccountLog");
     const btnTradeServiceRefresh = document.getElementById("btnTradeServiceRefresh");
@@ -1077,12 +1105,12 @@
     let trailingPollTimer = null;
     /** 交易记录表格估算手续费：名义×费率（与 .env DISPLAY_EST_FEE_RATE 同步，默认 0.0005） */
     let displayEstFeeRate = 0.0005;
-    const outBalance = document.getElementById("outBalance");
-    const balancePlain = document.getElementById("balancePlain");
-    const balanceRawTitle = document.getElementById("balanceRawTitle");
-    const balanceToggleWrap = document.getElementById("balanceToggleWrap");
-    const btnToggleRawJson = document.getElementById("btnToggleRawJson");
-    let balanceRawVisible = false;
+    const accOutBalance = document.getElementById("accOutBalance");
+    const accBalancePlain = document.getElementById("accBalancePlain");
+    const accBalanceRawTitle = document.getElementById("accBalanceRawTitle");
+    const accBalanceToggleWrap = document.getElementById("accBalanceToggleWrap");
+    const accBtnToggleRawJson = document.getElementById("accBtnToggleRawJson");
+    let accBalanceRawVisible = false;
 
     /** TradingView 告警 JSON 骨架（与旧版只读模板一致，供一键生成） */
     const TV_TPL_WEBHOOK_TEMPLATE_CAPITAL = `{
@@ -1106,6 +1134,12 @@
 }`;
 
     function fmtU(n) {
+      if (n === null || n === undefined || typeof n === "object") return "—";
+      const x = Number(n);
+      if (Number.isNaN(x)) return "—";
+      return x.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+    }
+    function fmtN(n) {
       if (n === null || n === undefined || typeof n === "object") return "—";
       const x = Number(n);
       if (Number.isNaN(x)) return "—";
@@ -1695,12 +1729,12 @@
       }
     }
 
-    function renderBalancePlain(d) {
-      if (!balancePlain) return;
+    function renderAccBalancePlain(d) {
+      if (!accBalancePlain) return;
       if (!d || !d.ok) {
-        balancePlain.style.display = "none";
-        if (balanceRawTitle) balanceRawTitle.style.display = "none";
-        if (balanceToggleWrap) balanceToggleWrap.style.display = "none";
+        accBalancePlain.style.display = "none";
+        if (accBalanceRawTitle) accBalanceRawTitle.style.display = "none";
+        if (accBalanceToggleWrap) accBalanceToggleWrap.style.display = "none";
         return;
       }
       try {
@@ -1710,67 +1744,83 @@
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;");
-        const block = (title, u) => {
-          if (!u || u.error) {
-            const err = u && u.error ? esc(String(u.error)) : "无数据";
-            return `<div class="row-line"><strong>${esc(title)}</strong>：${err}</div>`;
-          }
-          const ccy = esc(String(u.currency || "USDT"));
-          return (
-            `<div class="row-line"><strong>${esc(title)}</strong></div>` +
-            `<div class="row-line">余额（总权益）<span class="num">${fmtU(u.total)}</span> ${ccy}</div>` +
-            `<div class="row-line">可用余额 <span class="num">${fmtU(u.free)}</span> ${ccy}</div>` +
-            `<div class="row-line">占用（保证金等）<span class="num">${fmtU(u.used)}</span> ${ccy}</div>`
-          );
-        };
-        if (d.accounts && d.accounts.length) {
-          let html = "";
-          d.accounts.forEach((acc, i) => {
-            const title = `${acc.remark || acc.account_id || "账户"}（模板本金 ${acc.template_capital_usdt != null ? acc.template_capital_usdt : "—"}U；固定回退 ${acc.fixed_quote_usdt != null ? acc.fixed_quote_usdt : "—"}U）`;
+
+        // 构建横向表格
+        const buildTable = (accounts) => {
+          let rows = "";
+          accounts.forEach((acc) => {
+            const name = esc(acc.remark || acc.account_id || "账户");
+
             if (acc.error) {
-              html +=
-                `<div class="row-line"><strong>${esc(title)}</strong></div>` +
-                `<div class="row-line hint">${esc(String(acc.error))}</div>`;
-            } else {
-              html += `<div class="row-line"><strong>${esc(title)}</strong></div>`;
-              html += block("U 本位合约", acc.usdt_future);
-              html += `<div style="margin:0.45rem 0;border-top:1px solid var(--border);"></div>`;
-              html += block("现货钱包", acc.usdt_spot);
+              rows += `<tr><td colspan="6" style="color:var(--err);">${name}：${esc(String(acc.error))}</td></tr>`;
+              return;
             }
-            if (i < d.accounts.length - 1) {
-              html += `<div style="margin:0.75rem 0;border-top:1px solid var(--border);"></div>`;
-            }
+
+            const fut = acc.usdt_future || {};
+            const spot = acc.usdt_spot || {};
+
+            rows += `<tr>
+              <td style="white-space:nowrap;font-size:0.85rem;">${name}</td>
+              <td style="text-align:right;font-size:0.85rem;"><span class="num">${fmtU(fut.total)}</span></td>
+              <td style="text-align:right;font-size:0.85rem;"><span class="num">${fmtU(fut.free)}</span></td>
+              <td style="text-align:right;font-size:0.85rem;"><span class="num">${fmtU(fut.used)}</span></td>
+              <td style="text-align:right;font-size:0.85rem;"><span class="num">${fmtU(spot.total)}</span></td>
+              <td style="text-align:right;font-size:0.85rem;"><span class="num">${fmtU(spot.free)}</span></td>
+            </tr>`;
           });
-          balancePlain.innerHTML =
-            html +
-            (d.hint
-              ? `<p class="hint" style="margin-top:0.65rem;margin-bottom:0;">${esc(d.hint)}</p>`
-              : "");
+
+          return `<div class="table-wrap" style="margin-top:0.5rem;">
+            <table class="siglog" style="font-size:0.85rem;">
+              <thead>
+                <tr>
+                  <th style="font-size:0.85rem;">账户</th>
+                  <th style="text-align:right;font-size:0.85rem;">合约总权益</th>
+                  <th style="text-align:right;font-size:0.85rem;">合约可用</th>
+                  <th style="text-align:right;font-size:0.85rem;">合约占用</th>
+                  <th style="text-align:right;font-size:0.85rem;">现货总权益</th>
+                  <th style="text-align:right;font-size:0.85rem;">现货可用</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+        };
+
+        let html = "";
+        if (d.accounts && d.accounts.length) {
+          html += buildTable(d.accounts);
         } else {
-          balancePlain.innerHTML =
-            block("U 本位合约", d.usdt_future) +
-            `<div style="margin:0.6rem 0;border-top:1px solid var(--border);"></div>` +
-            block("现货钱包", d.usdt_spot) +
-            (d.hint
-              ? `<p class="hint" style="margin-top:0.65rem;margin-bottom:0;">${esc(d.hint)}</p>`
-              : "");
+          // 单账户模式，包装成数组
+          html += buildTable([{
+            remark: d.remark || d.account_id || "账户",
+            template_capital_usdt: d.template_capital_usdt,
+            fixed_quote_usdt: d.fixed_quote_usdt,
+            usdt_future: d.usdt_future,
+            usdt_spot: d.usdt_spot
+          }]);
         }
-        balancePlain.style.display = "block";
-        if (balanceToggleWrap) balanceToggleWrap.style.display = "block";
+
+        if (d.hint) {
+          html += `<p class="hint" style="margin-top:0.65rem;margin-bottom:0;">${esc(d.hint)}</p>`;
+        }
+
+        accBalancePlain.innerHTML = html;
+        accBalancePlain.style.display = "block";
+        if (accBalanceToggleWrap) accBalanceToggleWrap.style.display = "block";
       } catch (err) {
-        balancePlain.innerHTML =
+        accBalancePlain.innerHTML =
           `<p class="hint">摘要渲染失败：${esc(err.message)}</p><p class="hint">请用下方「显示原始 JSON」查看接口数据。</p>`;
-        balancePlain.style.display = "block";
-        if (balanceToggleWrap) balanceToggleWrap.style.display = "block";
+        accBalancePlain.style.display = "block";
+        if (accBalanceToggleWrap) accBalanceToggleWrap.style.display = "block";
       }
     }
 
-    function setBalanceRawJsonVisible(show) {
-      balanceRawVisible = show;
-      if (balanceRawTitle) balanceRawTitle.style.display = show ? "block" : "none";
-      if (outBalance) outBalance.style.display = show ? "block" : "none";
-      if (btnToggleRawJson) {
-        btnToggleRawJson.textContent = show ? "隐藏原始 JSON" : "显示原始 JSON";
+    function setAccBalanceRawJsonVisible(show) {
+      accBalanceRawVisible = show;
+      if (accBalanceRawTitle) accBalanceRawTitle.style.display = show ? "block" : "none";
+      if (accOutBalance) accOutBalance.style.display = show ? "block" : "none";
+      if (accBtnToggleRawJson) {
+        accBtnToggleRawJson.textContent = show ? "隐藏原始 JSON" : "显示原始 JSON";
       }
     }
 
@@ -1937,9 +1987,76 @@
         el.textContent = (texts && texts.restore) || el._origText || "";
       }
     }
+
+    async function doAccPositions() {
+      if (!getSecret()) return;
+      const tbody = document.getElementById("accPositionsTbody");
+      const hint = document.getElementById("accPositionsHint");
+      const box = document.getElementById("accPositionsBox");
+      if (!tbody) return;
+      try {
+        const sel = document.getElementById("accountSelectAccount");
+        const aid = sel ? sel.value : "";
+        const r = await fetch("/api/positions", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ secret: getSecret(), account_id: aid || undefined }),
+        });
+        const d = await r.json();
+        if (!d.ok || !d.accounts) {
+          tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--err);">获取失败: ${escHtml(d.error || "未知错误")}</td></tr>`;
+          if (box) box.style.display = "none";
+          return;
+        }
+        const allPositions = [];
+        let totalPnl = 0;
+        let totalPosCount = 0;
+        d.accounts.forEach((acc) => {
+          const label = acc.remark || acc.account_id || "未知";
+          (acc.positions || []).forEach((p) => {
+            allPositions.push({ accountLabel: label, ...p });
+            totalPnl += p.pnl || 0;
+            totalPosCount++;
+          });
+        });
+        if (box) {
+          box.style.display = "block";
+          box.innerHTML =
+            `<div class="row-line">持仓总数 <span class="num">${totalPosCount}</span> 个 · ` +
+            `总浮盈 <span class="num" style="color:${totalPnl >= 0 ? 'var(--ok)' : 'var(--err)'}">${fmtU(totalPnl)} USDT</span></div>`;
+        }
+        if (allPositions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);">暂无持仓</td></tr>';
+          if (hint) hint.textContent = "当前无持仓";
+          return;
+        }
+        if (hint) hint.textContent = `共 ${allPositions.length} 条持仓记录。`;
+        tbody.innerHTML = allPositions
+          .map((p) => {
+            const sideCls = p.side === "long" ? "tag-buy" : "tag-sell";
+            const sideText = p.side === "long" ? "多" : p.side === "short" ? "空" : escHtml(p.side || "—");
+            const pnlCls = p.pnl >= 0 ? "num" : "num err";
+            const pnlPctCls = p.pnl_pct >= 0 ? "num" : "num err";
+            return `<tr>
+              <td style="white-space:nowrap;">${escHtml(p.accountLabel)}</td>
+              <td><code>${escHtml(p.symbol)}</code></td>
+              <td style="text-align:center;"><span class="tag ${sideCls}">${sideText}</span></td>
+              <td style="text-align:right;">${fmtN(p.quantity)}</td>
+              <td style="text-align:right;">${fmtN(p.entry_price)}</td>
+              <td style="text-align:right;">${fmtN(p.mark_price)}</td>
+              <td style="text-align:right;"><span class="${pnlPctCls}">${p.pnl_pct >= 0 ? "+" : ""}${fmtN(p.pnl_pct)}%</span></td>
+              <td style="text-align:right;"><span class="${pnlCls}">${fmtU(p.pnl)}</span></td>
+            </tr>`;
+          })
+          .join("");
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--err);">加载失败: ${escHtml(e.message)}</td></tr>`;
+      }
+    }
+
     function updateButtons() {
       const ok = getSecret().length > 0;
-      btnBalance.disabled = !ok;
+      if (btnRefreshAccount) btnRefreshAccount.disabled = !ok;
       if (btnWebhookTest) btnWebhookTest.disabled = !ok || !isAdminRole();
       if (btnAccountLog) btnAccountLog.disabled = !ok;
       if (btnTradeServiceRefresh) btnTradeServiceRefresh.disabled = !ok;
@@ -1980,7 +2097,7 @@
     }
 
     function populateAccountSelects() {
-      const balSel = document.getElementById("accountSelectBalance");
+      const accSel = document.getElementById("accountSelectAccount");
       const logSel = document.getElementById("accountLogFilter");
       const opts = accountsState
         .filter((a) => a.id)
@@ -1989,8 +2106,8 @@
           return `<option value="${vid}">${escHtml(a.remark || a.id)}</option>`;
         })
         .join("");
-      if (balSel) {
-        balSel.innerHTML = `<option value="">全部账户</option>` + opts;
+      if (accSel) {
+        accSel.innerHTML = `<option value="">全部账户</option>` + opts;
       }
       if (logSel) {
         const cur = logSel.value;
@@ -2223,7 +2340,7 @@
         }
         renderAccountsTable();
         populateAccountSelects();
-        maybeRefreshBalanceIfVisible();
+        maybeRefreshAccountIfVisible();
       } catch (e) {
         if (el) el.textContent = "请求失败：" + String(e);
       }
@@ -2274,7 +2391,7 @@
         populateAccountSelects();
         await fetchStatus();
         loadAccountLog();
-        maybeRefreshBalanceIfVisible();
+        maybeRefreshAccountIfVisible();
       } catch (e) {
         alert(String(e));
       } finally {
@@ -2491,18 +2608,18 @@
       }
     }
 
-    async function doBalance() {
-      if (balancePlain) balancePlain.style.display = "none";
-      if (balanceRawTitle) balanceRawTitle.style.display = "none";
-      if (balanceToggleWrap) balanceToggleWrap.style.display = "none";
-      setBalanceRawJsonVisible(false);
-      if (outBalance) {
-        outBalance.style.display = "block";
-        outBalance.className = "out";
-        outBalance.textContent = "请求中…";
+    async function doAccBalance() {
+      if (accBalancePlain) accBalancePlain.style.display = "none";
+      if (accBalanceRawTitle) accBalanceRawTitle.style.display = "none";
+      if (accBalanceToggleWrap) accBalanceToggleWrap.style.display = "none";
+      setAccBalanceRawJsonVisible(false);
+      if (accOutBalance) {
+        accOutBalance.style.display = "block";
+        accOutBalance.className = "out";
+        accOutBalance.textContent = "请求中…";
       }
       try {
-        const aid = document.getElementById("accountSelectBalance")?.value || "";
+        const aid = document.getElementById("accountSelectAccount")?.value || "";
         const body = { secret: getSecret() };
         if (aid) body.account_id = aid;
         const r = await fetch("/api/balance", {
@@ -2519,21 +2636,34 @@
             说明: "这是旧版服务的 HTML 报错。请关闭终端里旧的 python 进程后，重新运行: python python量化/tv_binance_bot/app.py",
           };
         }
-        if (outBalance) outBalance.textContent = JSON.stringify(d, null, 2);
-        renderBalancePlain(d);
+        if (accOutBalance) accOutBalance.textContent = JSON.stringify(d, null, 2);
+        renderAccBalancePlain(d);
         if (!r.ok || (d && d.ok === false)) {
-          if (outBalance) outBalance.classList.add("err");
-          setBalanceRawJsonVisible(true);
+          if (accOutBalance) accOutBalance.classList.add("err");
+          setAccBalanceRawJsonVisible(true);
         } else {
-          if (outBalance) outBalance.classList.remove("err");
-          setBalanceRawJsonVisible(false);
+          if (accOutBalance) accOutBalance.classList.remove("err");
+          setAccBalanceRawJsonVisible(false);
         }
       } catch (e) {
-        if (outBalance) {
-          outBalance.classList.add("err");
-          outBalance.textContent = String(e);
+        if (accOutBalance) {
+          accOutBalance.classList.add("err");
+          accOutBalance.textContent = String(e);
         }
-        setBalanceRawJsonVisible(true);
+        setAccBalanceRawJsonVisible(true);
+      }
+    }
+
+    async function doAccRefresh() {
+      const btn = document.getElementById("btnRefreshAccount");
+      setLoading(btn, true);
+      try {
+        await Promise.all([
+          doAccBalance(),
+          doAccPositions(),
+        ]);
+      } finally {
+        setLoading(btn, false);
       }
     }
 
@@ -2561,20 +2691,20 @@
     if (btnSaveBotSettings) btnSaveBotSettings.addEventListener("click", saveBotSettings);
     if (btnReloadAccounts) btnReloadAccounts.addEventListener("click", loadAccounts);
     secretEl.addEventListener("input", updateButtons);
-    btnBalance.addEventListener("click", doBalance);
+    if (btnRefreshAccount) btnRefreshAccount.addEventListener("click", doAccRefresh);
     const webhookSizingModeEl = document.getElementById("webhookSizingMode");
     if (webhookSizingModeEl) {
       webhookSizingModeEl.addEventListener("change", updateWebhookSettingsPanel);
     }
-    const accountSelectBalanceEl = document.getElementById("accountSelectBalance");
-    if (accountSelectBalanceEl) {
-      accountSelectBalanceEl.addEventListener("change", () => {
-        if (getSecret()) doBalance().catch(() => {});
+    const accountSelectAccountEl = document.getElementById("accountSelectAccount");
+    if (accountSelectAccountEl) {
+      accountSelectAccountEl.addEventListener("change", () => {
+        if (getSecret()) doAccRefresh().catch(() => {});
       });
     }
-    if (btnToggleRawJson) {
-      btnToggleRawJson.addEventListener("click", () => {
-        setBalanceRawJsonVisible(!balanceRawVisible);
+    if (accBtnToggleRawJson) {
+      accBtnToggleRawJson.addEventListener("click", () => {
+        setAccBalanceRawJsonVisible(!accBalanceRawVisible);
       });
     }
 
@@ -3019,8 +3149,8 @@
           if (name === "trades") {
             loadExchangeTrades();
           }
-          if (name === "balance" && getSecret()) {
-            doBalance().catch(() => {});
+          if (name === "account" && getSecret()) {
+            doAccRefresh().catch(() => {});
           }
           if (name === "trailing") {
             refreshTrailingStatus();
@@ -3057,10 +3187,10 @@
       document.querySelectorAll(".help-tip.show").forEach((el) => el.classList.remove("show"));
     });
 
-    function maybeRefreshBalanceIfVisible() {
-      const p = document.getElementById("panel-balance");
+    function maybeRefreshAccountIfVisible() {
+      const p = document.getElementById("panel-account");
       if (p && p.classList.contains("active") && getSecret()) {
-        doBalance().catch(() => {});
+        doAccRefresh().catch(() => {});
       }
     }
 

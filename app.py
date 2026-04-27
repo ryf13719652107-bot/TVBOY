@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -2036,18 +2037,18 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                 symbol, "market", action, order_amt, market_price, params
             )
         
-        logger.info(f"[下单调试] 订单创建成功: {order.get('id', 'N/A')}")
+        logger.info("[下单调试] 订单创建成功: %s", order.get("id", "N/A"))
         return order
         
     except Exception as e:
-        logger.error(f"[下单调试] 订单创建失败: {e}")
-        logger.error(f"[下单调试] 交易对: {symbol}")
-        logger.error(f"[下单调试] 动作: {action}")
-        logger.error(f"[下单调试] 成本: {cost}")
-        logger.error(f"[下单调试] 数量: {amt}")
-        logger.error(f"[下单调试] 参数: {params}")
-        logger.error(f"[下单调试] 市场价: {market_price}")
-        logger.error(f"[下单调试] 交易所: {exchange.id}")
+        logger.error("[下单调试] 订单创建失败: %s", e)
+        logger.error("[下单调试] 交易对: %s", symbol)
+        logger.error("[下单调试] 动作: %s", action)
+        logger.error("[下单调试] 成本: %s", cost)
+        logger.error("[下单调试] 数量: %s", amt)
+        logger.error("[下单调试] 参数: %s", params)
+        logger.error("[下单调试] 市场价: %s", market_price)
+        logger.error("[下单调试] 交易所: %s", exchange.id)
         err_txt = str(e)
         if _exchange_id(exchange) == "okx" and (
             "51008" in err_txt or "Insufficient" in err_txt and "margin" in err_txt
@@ -2573,6 +2574,99 @@ def api_balance():
         return jsonify(resp)
     except Exception as e:
         logger.exception("查询余额失败")
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.post("/api/positions")
+def api_positions():
+    """查询各账户当前持仓（需控制台密钥）。"""
+    bad = dashboard_auth_response_if_invalid(allow_viewer=True)
+    if bad:
+        return bad
+    accs = _load_accounts()
+    if not accs:
+        return jsonify({"ok": False, "error": "未配置交易账户"}), 503
+    body = request.get_json(silent=True) or {}
+    only_id = body.get("account_id")
+    if only_id:
+        accs = [a for a in accs if str(a.get("id")) == str(only_id)]
+        if not accs:
+            return jsonify({"ok": False, "error": "找不到该 account_id"}), 400
+    rows: list[dict[str, Any]] = []
+    try:
+        for a in accs:
+            if not a.get("enabled", True):
+                continue
+            aid = str(a.get("id") or "")
+            remark = str(a.get("remark") or "")
+            ex_name = str(a.get("exchange") or "binance").lower()
+            try:
+                ex = get_exchange_for_account(a, purpose="read")
+                ex_id = _exchange_id(ex)
+                fut_type = "swap" if ex_id in ("hyperliquid", "okx") else "future"
+                params: dict[str, Any] = {"type": fut_type}
+                if ex_id == "hyperliquid":
+                    params["user"] = str(a.get("api_key") or "")
+                raw_positions = ex.fetch_positions([], params)
+                positions_out: list[dict[str, Any]] = []
+                for p in raw_positions:
+                    if not isinstance(p, dict):
+                        continue
+                    sym = str(p.get("symbol") or "")
+                    qty = float(p.get("contracts") or 0)
+                    info = p.get("info") or {}
+                    if qty == 0 and isinstance(info, dict):
+                        qty = abs(float(info.get("positionAmt") or info.get("pos") or 0))
+                    if qty <= 0:
+                        continue
+                    entry = float(p.get("entryPrice") or 0)
+                    if entry <= 0 and isinstance(info, dict):
+                        entry = float(info.get("entryPrice") or info.get("avgPx") or 0)
+                    mark = float(p.get("markPrice") or 0)
+                    if mark <= 0 and isinstance(info, dict):
+                        mark = float(info.get("markPrice") or info.get("markPx") or 0)
+                    side = str(p.get("side") or "").lower()
+                    if side not in ("long", "short") and isinstance(info, dict):
+                        pa = float(info.get("positionAmt") or 0)
+                        if pa > 0:
+                            side = "long"
+                        elif pa < 0:
+                            side = "short"
+                    pnl_pct = 0.0
+                    if entry > 0 and mark > 0:
+                        pnl_pct = ((mark - entry) / entry) * 100.0 if side == "long" else ((entry - mark) / entry) * 100.0
+                    pnl_raw = float(p.get("unrealizedPnl") or p.get("unrealisedPnl") or 0)
+                    if pnl_raw == 0 and isinstance(info, dict):
+                        pnl_raw = float(info.get("unRealizedProfit") or info.get("upl") or 0)
+                    positions_out.append({
+                        "symbol": sym,
+                        "side": side,
+                        "quantity": round(qty, 6),
+                        "entry_price": round(entry, 8),
+                        "mark_price": round(mark, 8),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "pnl": round(pnl_raw, 2),
+                    })
+                rows.append({
+                    "account_id": aid,
+                    "remark": remark,
+                    "exchange": ex_name,
+                    "positions": positions_out,
+                    "position_count": len(positions_out),
+                })
+            except Exception as e:
+                logger.warning("账户 %s 查询持仓失败: %s", aid, e)
+                rows.append({
+                    "account_id": aid,
+                    "remark": remark,
+                    "exchange": ex_name,
+                    "error": str(e),
+                    "positions": [],
+                    "position_count": 0,
+                })
+        return jsonify({"ok": True, "accounts": rows})
+    except Exception as e:
+        logger.exception("查询持仓失败")
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
@@ -3560,6 +3654,30 @@ def webhook():
     return jsonify({"ok": ok_all, "results": final_results})
 
 
+def graceful_shutdown(signum: int, frame) -> None:
+    """收到 SIGINT/SIGTERM 时优雅关闭：停止移动止盈线程，刷日志到磁盘。"""
+    logger.info("收到退出信号 %s，开始优雅关闭...", signum)
+
+    # 1. 停止所有移动止盈线程
+    with _trailing_stop_tasks_lock:
+        for aid, task in list(_trailing_stop_tasks.items()):
+            if task.get("running"):
+                stop_ev: threading.Event = task["stop"]
+                stop_ev.set()
+                th: threading.Thread | None = task.get("thread")
+                if th is not None:
+                    logger.info("正在等待移动止盈线程 %s 结束（最长 5 秒）...", aid[:8])
+                    th.join(timeout=5.0)
+                _trailing_stop_tasks.pop(aid, None)
+
+    # 2. 刷日志到磁盘
+    with _LOG_LOCK:
+        _save_execution_log()
+        _save_signal_log()
+    logger.info("日志已保存，进程退出。再见!")
+    sys.exit(0)
+
+
 def main():
     if not WEBHOOK_SECRET and not DASHBOARD_SECRET and not DASHBOARD_VIEWER_SECRET:
         print(
@@ -3578,6 +3696,11 @@ def main():
     if PRELOAD_MARKETS_ON_STARTUP:
         start_preload_trade_markets_in_background()
     _get_webhook_finalize_executor()
+
+    # 注册优雅关闭信号
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+
     port = int(os.getenv("PORT", "5000"))
     # threaded=True：控制台查余额/拉日志等慢请求不阻塞另一条线程处理 /webhook 下单
     threaded = os.getenv("FLASK_THREADED", "true").lower() in ("1", "true", "yes", "on")
