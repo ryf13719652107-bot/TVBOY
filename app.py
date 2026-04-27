@@ -3037,6 +3037,7 @@ def _trailing_stop_thread_main(
             limit_offset_bps=float(params.get("limit_offset_bps", 25)),
             trailing_exec=str(params.get("trailing_exec") or "signal"),
             exchange_algo_type=resolved_eat,
+            testnet=USE_TESTNET,
         )
         worker.restore_existing_algos()
         _idle_sec = float(params.get("idle_no_position_sec", 10))

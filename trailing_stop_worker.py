@@ -96,6 +96,7 @@ class TrailingStopWorker:
         limit_offset_bps: float = 25.0,
         trailing_exec: str = "signal",
         exchange_algo_type: str = "stop_market",
+        testnet: bool = False,
     ) -> None:
         self.exchange = exchange
         self.account_id = account_id
@@ -116,6 +117,7 @@ class TrailingStopWorker:
         self.exchange_algo_type = (
             eat if eat in ("stop_market", "stop_limit") else "stop_market"
         )
+        self.testnet = testnet
         self._algo_trailing_id: dict[str, str] = {}
         self._last_trigger_tp_str: dict[str, str] = {}
         self.stop_loss_pct = float(stop_loss_pct)
@@ -227,7 +229,7 @@ class TrailingStopWorker:
                 exchange_id=exchange_id,
                 symbols=symbols,
                 on_price_update=self._on_websocket_price_update,
-                testnet=False,
+                testnet=self.testnet,
             )
 
             if self._websocket_feed:
@@ -328,21 +330,19 @@ class TrailingStopWorker:
 
     def _price_feed_loop(self, interval: float) -> None:
         """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
-        优化：支持更短间隔，增加错误处理和连接保活，增加时间戳
-        注意：如果启用了 WebSocket，此线程作为备用"""
+        WebSocket 正常时闲置（每 5s 检查一次）；WebSocket 失效时降级到 REST API，
+        间隔不低于 3.0s 以避免触发交易所 API 限频。"""
         consecutive_errors = 0
+        base_interval = max(3.0, interval)
         while not self._price_feed_stop.is_set():
             start_time = time.time()
 
-            # 如果 WebSocket 已连接且正常工作，减少 REST API 调用频率
             if self._websocket_feed and self._websocket_feed.is_connected():
-                # WebSocket 正常，每5秒检查一次作为备用
                 if self._price_feed_stop.wait(timeout=5.0):
                     break
                 continue
 
             try:
-                # WebSocket 未连接或失败，使用 REST API
                 tickers = self.exchange.fetch_tickers()
                 if isinstance(tickers, dict):
                     with self.price_lock:
@@ -351,14 +351,17 @@ class TrailingStopWorker:
                     consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
-                if consecutive_errors <= 3:
-                    logger.warning(
-                        "移动止盈[%s] 价格推送获取失败(%d次): %s",
-                        self.account_id, consecutive_errors, e
-                    )
+                wait = min(consecutive_errors, 5)
+                logger.warning(
+                    "移动止盈[%s] 价格推送获取失败(%d次) %s，%ds后重试",
+                    self.account_id, consecutive_errors, e, wait,
+                )
+                if self._price_feed_stop.wait(timeout=wait):
+                    break
+                continue
 
             elapsed = time.time() - start_time
-            sleep_time = max(0, interval - elapsed)
+            sleep_time = max(0, base_interval - elapsed)
             if self._price_feed_stop.wait(timeout=sleep_time):
                 break
 
@@ -1257,8 +1260,7 @@ class TrailingStopWorker:
         if self.use_last_price:
             self._price_feed_stop.clear()
             self._price_feed_data = None
-            # 优化：价格推送间隔从 0.3s 降至 0.1s，提高价格更新频率
-            price_feed_interval = min(0.1, monitor_interval / 3)
+            price_feed_interval = max(3.0, monitor_interval)
             self._price_feed_thread = threading.Thread(
                 target=self._price_feed_loop,
                 args=(price_feed_interval,),
