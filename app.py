@@ -1364,6 +1364,7 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
             }
         )
         ex.options["fetchCurrencies"] = False
+        ex.options["adjustForTimeDifference"] = True
         if USE_TESTNET:
             ex.set_sandbox_mode(True)
     elif ex_name == "okx":
@@ -2079,7 +2080,11 @@ def _before_request_reload_env():
 
 @app.get("/")
 def dashboard():
-    return send_from_directory(app.static_folder, "index.html")
+    resp = send_from_directory(app.static_folder, "index.html")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3025,9 +3030,11 @@ def _trailing_stop_thread_main(
             low_trail_stop_loss_pct=float(params["low_trail_stop_loss_pct"]),
             trail_stop_loss_pct=float(params["trail_stop_loss_pct"]),
             higher_trail_stop_loss_pct=float(params["higher_trail_stop_loss_pct"]),
+            third_trail_stop_loss_pct=float(params.get("third_trail_stop_loss_pct", 0.5)),
             low_trail_profit_threshold=float(params["low_trail_profit_threshold"]),
             first_trail_profit_threshold=float(params["first_trail_profit_threshold"]),
             second_trail_profit_threshold=float(params["second_trail_profit_threshold"]),
+            third_trail_profit_threshold=float(params.get("third_trail_profit_threshold", 2.1)),
             feishu_webhook=params.get("feishu_webhook") or None,
             blacklist=params.get("blacklist") or set(),
             status_hook=_hook,
@@ -3035,6 +3042,10 @@ def _trailing_stop_thread_main(
             use_last_price_only=bool(params.get("use_last_price_only")),
             close_mode=str(params.get("close_mode") or "market"),
             limit_offset_bps=float(params.get("limit_offset_bps", 25)),
+            low_offset_bps=params.get("low_offset_bps"),
+            first_offset_bps=params.get("first_offset_bps"),
+            second_offset_bps=params.get("second_offset_bps"),
+            third_offset_bps=params.get("third_offset_bps"),
             trailing_exec=str(params.get("trailing_exec") or "signal"),
             exchange_algo_type=resolved_eat,
             testnet=USE_TESTNET,
@@ -3064,7 +3075,12 @@ def _trailing_stop_thread_main(
 
 @app.get("/trailing-stop")
 def trailing_stop_dashboard():
-    return send_from_directory(app.static_folder, "trailing_stop.html")
+    resp = send_from_directory(app.static_folder, "trailing_stop.html")
+    # 禁用浏览器缓存，确保前端 UI 改动立即生效
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.get("/api/trailing-stop/status")
@@ -3302,6 +3318,16 @@ def api_trailing_stop_start():
             raise ValueError(f"缺少数字字段 {name}")
         return float(v)
 
+    def _opt_float_local(name: str) -> float | None:
+        v = body.get(name)
+        if v is None or v == "":
+            return None
+        try:
+            f = float(v)
+            return f if f >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
     try:
         p = {
             "monitor_interval": monitor_interval,
@@ -3311,15 +3337,21 @@ def api_trailing_stop_start():
             "take_profit_mode": take_profit_mode,
             "close_mode": close_mode_str,
             "limit_offset_bps": limit_offset_bps,
+            "low_offset_bps": _opt_float_local("low_offset_bps"),
+            "first_offset_bps": _opt_float_local("first_offset_bps"),
+            "second_offset_bps": _opt_float_local("second_offset_bps"),
+            "third_offset_bps": _opt_float_local("third_offset_bps"),
             "trailing_exec": trailing_exec,
             "exchange_algo_type": exchange_algo_type,
             "stop_loss_pct": _req_pct("stop_loss_pct", 50),
             "low_trail_stop_loss_pct": _req_pct("low_trail_stop_loss_pct", 0.2),
             "trail_stop_loss_pct": _req_pct("trail_stop_loss_pct", 0.2),
-            "higher_trail_stop_loss_pct": _req_pct("higher_trail_stop_loss_pct", 0.3),
+            "higher_trail_stop_loss_pct": _req_pct("higher_trail_stop_loss_pct", 0.4),
+            "third_trail_stop_loss_pct": _req_pct("third_trail_stop_loss_pct", 0.5),
             "low_trail_profit_threshold": _req_pct("low_trail_profit_threshold", 0.9),
             "first_trail_profit_threshold": _req_pct("first_trail_profit_threshold", 1),
             "second_trail_profit_threshold": _req_pct("second_trail_profit_threshold", 1.5),
+            "third_trail_profit_threshold": _req_pct("third_trail_profit_threshold", 2.1),
         }
     except (TypeError, ValueError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -3329,6 +3361,7 @@ def api_trailing_stop_start():
     for key, label in (
         ("trail_stop_loss_pct", "第一档回撤比例"),
         ("higher_trail_stop_loss_pct", "第二档回撤比例"),
+        ("third_trail_stop_loss_pct", "第三档回撤比例"),
     ):
         v = float(p[key])
         if v <= 0 or v > 1:
@@ -3345,12 +3378,13 @@ def api_trailing_stop_start():
     lo = float(p["low_trail_profit_threshold"])
     fi = float(p["first_trail_profit_threshold"])
     se = float(p["second_trail_profit_threshold"])
-    if not (lo < fi < se):
+    th = float(p["third_trail_profit_threshold"])
+    if not (lo < fi < se < th):
         return (
             jsonify(
                 {
                     "ok": False,
-                    "error": "分档浮盈阈值须严格递增：低档 < 第一档 < 第二档（例如 0.9 < 1.0 < 1.5）",
+                    "error": "分档浮盈阈值须严格递增：低档 < 第一档 < 第二档 < 第三档（例如 0.9 < 1.0 < 1.5 < 2.1）",
                 }
             ),
             400,

@@ -108,7 +108,7 @@
         </div>
         <div>
           <label for="monitorInterval">有持仓时监控间隔（秒）</label>
-          <input type="number" id="monitorInterval" min="0.3" max="120" step="0.1" value="0.5" />
+          <input type="number" id="monitorInterval" min="0.3" max="120" step="0.1" value="0.3" />
         </div>
       </div>
       <div class="row" style="margin-top: 0.65rem;">
@@ -130,8 +130,8 @@
           </select>
         </div>
         <div>
-          <label for="trackLimitOffsetBps">触发→委托价差（基点）</label>
-          <input type="number" id="trackLimitOffsetBps" min="0" max="500" step="1" value="25" title="多头：限价低于触发价；过小易触发后不成交，建议≥20 基点。" />
+          <label for="trackLimitOffsetBps">触发→委托价差（基点·兜底）</label>
+          <input type="number" id="trackLimitOffsetBps" min="0" max="500" step="1" value="25" title="兜底用：当下方某档滑点输入为空时使用此值；下方四档已填则不会用到此值。" />
         </div>
       </div>
 
@@ -144,6 +144,10 @@
           <label for="lowTrailStop">低档保护回撤线 %（浮盈低于此则平）</label>
           <input type="number" id="lowTrailStop" step="0.01" value="0.2" />
         </div>
+        <div>
+          <label for="lowOffsetBps">低档限价滑点（基点，仅 stop_limit）</label>
+          <input type="number" id="lowOffsetBps" min="0" max="500" step="1" value="5" placeholder="留空用全局" />
+        </div>
       </div>
 
       <div class="row" style="margin-top: 0.65rem;">
@@ -155,6 +159,10 @@
           <label for="trailStopLossPct">第一档回撤比例（最高盈利×(1-此值)）</label>
           <input type="number" id="trailStopLossPct" min="0.01" max="1" step="0.01" value="0.2" />
         </div>
+        <div>
+          <label for="firstOffsetBps">第一档限价滑点（基点）</label>
+          <input type="number" id="firstOffsetBps" min="0" max="500" step="1" value="15" placeholder="留空用全局" />
+        </div>
       </div>
 
       <div class="row" style="margin-top: 0.65rem;">
@@ -164,7 +172,26 @@
         </div>
         <div>
           <label for="higherTrailStopPct">第二档回撤比例</label>
-          <input type="number" id="higherTrailStopPct" min="0.01" max="1" step="0.01" value="0.3" />
+          <input type="number" id="higherTrailStopPct" min="0.01" max="1" step="0.01" value="0.4" />
+        </div>
+        <div>
+          <label for="secondOffsetBps">第二档限价滑点（基点）</label>
+          <input type="number" id="secondOffsetBps" min="0" max="500" step="1" value="20" placeholder="留空用全局" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="thirdTrailProfit">第三档移动止盈阈值 %</label>
+          <input type="number" id="thirdTrailProfit" min="0" step="0.1" value="2.1" />
+        </div>
+        <div>
+          <label for="thirdTrailStopPct">第三档回撤比例</label>
+          <input type="number" id="thirdTrailStopPct" min="0.01" max="1" step="0.01" value="0.5" />
+        </div>
+        <div>
+          <label for="thirdOffsetBps">第三档限价滑点（基点）</label>
+          <input type="number" id="thirdOffsetBps" min="0" max="500" step="1" value="30" placeholder="留空用全局" />
         </div>
       </div>
 
@@ -368,6 +395,14 @@
         return Number.isFinite(v) ? v : NaN;
       };
       const _ps = document.getElementById("priceSource")?.value || "mark";
+      const numOpt = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const v = el.value.trim();
+        if (v === "") return null;
+        const f = parseFloat(v);
+        return Number.isFinite(f) ? f : null;
+      };
       const body = {
         secret: getSecret(),
         account_id,
@@ -375,15 +410,21 @@
         use_last_price_only: _ps === "last_only",
         take_profit_mode: document.getElementById("takeProfitMode")?.value || "track",
         limit_offset_bps: num("trackLimitOffsetBps"),
+        low_offset_bps: numOpt("lowOffsetBps"),
+        first_offset_bps: numOpt("firstOffsetBps"),
+        second_offset_bps: numOpt("secondOffsetBps"),
+        third_offset_bps: numOpt("thirdOffsetBps"),
         idle_no_position_sec: num("idleNoPosition"),
         monitor_interval: num("monitorInterval"),
         stop_loss_pct: num("stopLossPct"),
         low_trail_stop_loss_pct: num("lowTrailStop"),
         trail_stop_loss_pct: num("trailStopLossPct"),
         higher_trail_stop_loss_pct: num("higherTrailStopPct"),
+        third_trail_stop_loss_pct: num("thirdTrailStopPct"),
         low_trail_profit_threshold: num("lowTrailProfit"),
         first_trail_profit_threshold: num("firstTrailProfit"),
         second_trail_profit_threshold: num("secondTrailProfit"),
+        third_trail_profit_threshold: num("thirdTrailProfit"),
         feishu_webhook: document.getElementById("feishuWebhook").value.trim() || null,
         blacklist: document.getElementById("blacklist").value.trim() || null,
       };
@@ -411,8 +452,12 @@
         formHint.textContent = "触发→委托价差基点须在 0～500";
         return;
       }
-      if (body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 || body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1) {
-        formHint.textContent = "两档回撤比例须在 0～1 之间（如 0.3）";
+      if (
+        body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 ||
+        body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1 ||
+        body.third_trail_stop_loss_pct <= 0 || body.third_trail_stop_loss_pct > 1
+      ) {
+        formHint.textContent = "三档回撤比例须在 0～1 之间（如 0.3）";
         return;
       }
       if (body.idle_no_position_sec < 5 || body.idle_no_position_sec > 120) {

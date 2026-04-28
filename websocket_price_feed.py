@@ -71,18 +71,30 @@ class BinanceWebSocketPriceFeed:
         self._disconnect_timestamps: list[tuple[float, str]] = []
 
     def _get_ws_url(self) -> str:
-        """获取币安组合流 WebSocket URL"""
-        base_url = (
-            "wss://stream.binancefuture.com"
-            if self.testnet
-            else "wss://fstream.binance.com"
-        )
-        # 使用 markPrice 流（每 3 秒强制推送，不依赖交易活动）
+        """获取币安组合流 WebSocket URL
+
+        2026-04-23 起，币安期货 WebSocket 强制使用路由路径 (/public、/market、/private)：
+            - markPrice、kline、ticker、aggTrade 等常规行情 → /market
+            - depth、bookTicker 等高频行情 → /public
+            - 用户数据(listenKey) → /private
+        老地址 wss://fstream.binance.com/stream?streams= 不带路由，markPrice 不会推送数据。
+        参考：https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams
+
+        组合订阅：
+            @markPrice@1s - 标记价（1秒强制推送，不依赖交易活动）
+                            注：默认 @markPrice 是 3秒，加 @1s 后变为 1秒，更低延迟
+            @aggTrade     - 聚合成交（按交易触发，提供真实最新成交价）
+        """
+        if self.testnet:
+            base_url = "wss://stream.binancefuture.com"
+        else:
+            base_url = "wss://fstream.binance.com"
         streams = []
         for sym in self.symbols:
             lower = sym.lower()
-            streams.append(f"{lower}@markPrice")
-        return f"{base_url}/stream?streams={'/'.join(streams)}"
+            streams.append(f"{lower}@markPrice@1s")
+            streams.append(f"{lower}@aggTrade")
+        return f"{base_url}/market/stream?streams={'/'.join(streams)}"
 
     async def _connect_and_listen(self):
         """连接并监听（组合流方式），手动管理连接生命周期"""
@@ -92,7 +104,7 @@ class BinanceWebSocketPriceFeed:
             return
 
         url = self._get_ws_url()
-        logger.info("[Binance WebSocket] 连接中...")
+        logger.info("[Binance WebSocket] 连接中... %s", url)
 
         ws = None
         try:
@@ -105,44 +117,42 @@ class BinanceWebSocketPriceFeed:
             )
 
             logger.info(
-                "[Binance WebSocket] 已连接，订阅 %d 个币种的 markPrice 流",
+                "[Binance WebSocket] 已连接，订阅 %d 个币种的 markPrice + aggTrade 流",
                 len(self.symbols)
             )
+
+            with self._connected_lock:
+                self._connected = True
+            self._last_connected_time = time.time()
 
             msg_count = 0
             no_data_time = time.time()
             first_data_arrived = False
-            last_ping = time.time()
 
             while not self._stop_event.is_set():
                 try:
                     message = await asyncio.wait_for(ws.recv(), timeout=5)
                 except asyncio.TimeoutError:
                     elapsed = time.time() - no_data_time
-                    now = time.time()
-                    if now - last_ping > 10:
-                        try:
-                            await ws.send("ping")
-                            last_ping = now
-                            logger.debug("[Binance WebSocket] 发送 ping")
-                            msg = await asyncio.wait_for(ws.recv(), timeout=3)
-                            if msg == "pong":
-                                logger.debug("[Binance WebSocket] 收到 pong")
-                        except Exception as e:
-                            logger.warning("[Binance WebSocket] ping/pong 失败: %s", e)
-                            break
                     if first_data_arrived and elapsed > 15:
                         logger.error(
                             "[Binance WebSocket] %.0f 秒无新数据，即将重连",
                             elapsed
                         )
                         break
-                    elif not first_data_arrived and elapsed > 10:
-                        logger.error(
-                            "[Binance WebSocket] 连接后 %.0f 秒未收到任何数据，即将重连",
-                            elapsed
-                        )
-                        break
+                    elif not first_data_arrived:
+                        if elapsed > 30:
+                            # 超过 30s 仍未收到任何数据，强制重连
+                            logger.error(
+                                "[Binance WebSocket] 连接后 %.0f 秒仍未收到首条数据，"
+                                "强制断开重连", elapsed
+                            )
+                            break
+                        elif elapsed > 10:
+                            logger.warning(
+                                "[Binance WebSocket] 连接后 %.0f 秒未收到首条数据，"
+                                "TCP 正常但无数据推送，等待中...", elapsed
+                            )
                     continue
 
                 if self._stop_event.is_set():
@@ -162,36 +172,60 @@ class BinanceWebSocketPriceFeed:
                         logger.debug("[Binance WebSocket] 非流消息: %s", list(data.keys()))
                         continue
 
-                    stream_symbol, stream_type = stream.split("@", 1)
+                    # stream 形如 'btcusdt@markPrice@1s' 或 'btcusdt@aggTrade'
+                    parts = stream.split("@")
+                    if len(parts) < 2:
+                        continue
+                    stream_symbol = parts[0]
+                    stream_type = parts[1]
                     symbol = stream_symbol.upper()
 
+                    parsed: dict[str, Any] | None = None
                     if stream_type == "markPrice":
-                        price_data = self._parse_mark_price(payload)
-                        if price_data:
-                            if not first_data_arrived:
-                                first_data_arrived = True
-                                self._last_connected_time = time.time()
-                                with self._connected_lock:
-                                    self._connected = True
-                                logger.info(
-                                    "[Binance WebSocket] 收到首条 markPrice %s: mark=%s",
-                                    symbol, price_data.get("mark")
-                                )
-
-                            with self._prices_lock:
-                                self._prices[symbol] = price_data
-                                self._last_update_time[symbol] = time.time()
-
-                            self._message_count += 1
-                            no_data_time = time.time()
-
-                            if self.on_price_update:
-                                try:
-                                    self.on_price_update(symbol, self._prices[symbol])
-                                except Exception as e:
-                                    logger.error("[Binance WebSocket] 回调错误: %s", e)
+                        parsed = self._parse_mark_price(payload)
+                        kind = "markPrice"
+                    elif stream_type == "aggTrade":
+                        parsed = self._parse_agg_trade(payload)
+                        kind = "aggTrade"
                     else:
                         logger.debug("[Binance WebSocket] 未知流类型: %s", stream_type)
+                        continue
+
+                    if not parsed:
+                        continue
+
+                    now = time.time()
+                    if not first_data_arrived:
+                        first_data_arrived = True
+                        self._last_connected_time = now
+                        with self._connected_lock:
+                            self._connected = True
+                        logger.info(
+                            "[Binance WebSocket] 收到首条 %s %s: %s",
+                            kind, symbol, parsed
+                        )
+
+                    with self._prices_lock:
+                        existing = self._prices.get(symbol, {})
+                        # 合并新数据，保留另一来源的字段
+                        merged = {**existing, **parsed, "received_at": now}
+                        # 没收到 last 时用 mark 兜底，反之亦然
+                        if "last" not in merged and "mark" in merged:
+                            merged["last"] = merged["mark"]
+                        if "mark" not in merged and "last" in merged:
+                            merged["mark"] = merged["last"]
+                        self._prices[symbol] = merged
+                        self._last_update_time[symbol] = now
+                        snapshot = dict(merged)
+
+                    self._message_count += 1
+                    no_data_time = now
+
+                    if self.on_price_update:
+                        try:
+                            self.on_price_update(symbol, snapshot)
+                        except Exception as e:
+                            logger.error("[Binance WebSocket] 回调错误: %s", e)
 
                 except json.JSONDecodeError as e:
                     logger.error("[Binance WebSocket] JSON解析错误: %s", e)
@@ -222,20 +256,36 @@ class BinanceWebSocketPriceFeed:
                     pass
 
     def _parse_mark_price(self, data: dict) -> dict[str, Any] | None:
-        """解析 markPrice 数据（每 3 秒推送，不依赖交易活动）"""
+        """解析 markPrice 数据（每 1s 或 3s 强制推送，不依赖交易活动）"""
         try:
             mark = float(data.get("p", 0))
-            index = float(data.get("i", 0))
+            if mark <= 0:
+                return None
             return {
                 "mark": mark,
-                "index": index,
-                "last": mark,  # 用 mark 价作为 last 的备选
+                "index": float(data.get("i", 0)),
                 "funding_rate": float(data.get("r", 0)),
                 "next_funding_time": data.get("T", 0),
-                "received_at": time.time(),
+                "received_at_mark": time.time(),
             }
         except (ValueError, TypeError) as e:
             logger.error("[Binance WebSocket] markPrice 解析错误: %s", e)
+            return None
+
+    def _parse_agg_trade(self, data: dict) -> dict[str, Any] | None:
+        """解析 aggTrade 数据（按聚合交易事件触发，提供真实最新成交价）"""
+        try:
+            last = float(data.get("p", 0))
+            if last <= 0:
+                return None
+            return {
+                "last": last,
+                "qty": float(data.get("q", 0)),
+                "trade_time": data.get("T", 0),
+                "received_at_last": time.time(),
+            }
+        except (ValueError, TypeError) as e:
+            logger.error("[Binance WebSocket] aggTrade 解析错误: %s", e)
             return None
 
     def _record_disconnect(self, reason: str):
@@ -345,6 +395,10 @@ class BinanceWebSocketPriceFeed:
         """检查连接状态（线程安全）"""
         with self._connected_lock:
             return self._connected
+
+    def has_received_data(self) -> bool:
+        """是否已收到过实际推送数据（区别于 TCP 连接状态）"""
+        return self._message_count > 0
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
@@ -484,6 +538,10 @@ class OKXWebSocketPriceFeed:
                 "[OKX WebSocket] 已发送订阅请求，%d 个币种",
                 len(self.symbols)
             )
+
+            with self._connected_lock:
+                self._connected = True
+            self._last_connected_time = time.time()
 
             first_data_arrived = False
             last_ping = time.time()
@@ -717,6 +775,10 @@ class OKXWebSocketPriceFeed:
         """检查连接状态（线程安全）"""
         with self._connected_lock:
             return self._connected
+
+    def has_received_data(self) -> bool:
+        """是否已收到过实际推送数据（区别于 TCP 连接状态）"""
+        return self._message_count > 0
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""

@@ -714,7 +714,7 @@
         </div>
         <div>
           <label for="trailingMonitorInterval">有持仓时监控间隔（秒）</label>
-          <input type="number" id="trailingMonitorInterval" min="0.5" max="120" step="0.5" value="1" />
+          <input type="number" id="trailingMonitorInterval" min="0.3" max="120" step="0.1" value="0.3" />
         </div>
       </div>
       <div class="row" style="margin-top: 0.65rem;">
@@ -737,7 +737,7 @@
         </div>
         <div>
           <label for="trailingTrackLimitOffsetBps">触发→委托价差（基点）</label>
-          <input type="number" id="trailingTrackLimitOffsetBps" min="0" max="500" step="1" value="25" title="多头平多：限价≈触发价×(1−基点/10000)再至少下移 2 个 tick；波动大或标记价触发时建议≥20 基点，过小易「已触发但不成交」。" />
+          <input type="number" id="trailingTrackLimitOffsetBps" min="0" max="500" step="1" value="25" title="兜底用：当下方某档滑点输入为空时使用此值；下方四档已填则不会用到此值。" />
         </div>
       </div>
       <p class="hint" style="margin-top: 0.35rem;">「条件限价追踪」：交易所以 CONDITIONAL 限价腿成交为主；本机**软件触发**平仓为单笔**限价 IOC**，未全成不补市价，下轮会再试。选「市价」时轮询/软件平仓为纯市价。请加大「触发→委托价差」可减轻有触发但 IOC 不吃的概率。</p>
@@ -748,7 +748,11 @@
         </div>
         <div>
           <label for="trailingLowTrailStop">低档保护回撤线 %（底线）</label>
-          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" title="进入低档后，平仓/条件单线=max(本底线%浮盈, 最高浮盈×(1−第一档回撤比例))，只随历史最高浮盈变；启动任务时要求 低档&lt;第一档&lt;第二档 阈值。" />
+          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" title="进入低档后，平仓/条件单线=max(本底线%浮盈, 最高浮盈×(1−第一档回撤比例))，只随历史最高浮盈变；启动任务时要求 低档&lt;第一档&lt;第二档&lt;第三档 阈值。" />
+        </div>
+        <div>
+          <label for="trailingLowOffsetBps">低档限价滑点（基点）</label>
+          <input type="number" id="trailingLowOffsetBps" min="0" max="500" step="1" value="5" placeholder="留空用全局" title="仅 stop_limit 模式生效；该档触发后限价单与触发价的让利距离" />
         </div>
       </div>
       <div class="row" style="margin-top: 0.65rem;">
@@ -760,6 +764,10 @@
           <label for="trailingTrailStopLossPct">第一档回撤比例（0～1）</label>
           <input type="number" id="trailingTrailStopLossPct" min="0.01" max="1" step="0.01" value="0.2" />
         </div>
+        <div>
+          <label for="trailingFirstOffsetBps">第一档限价滑点（基点）</label>
+          <input type="number" id="trailingFirstOffsetBps" min="0" max="500" step="1" value="15" placeholder="留空用全局" />
+        </div>
       </div>
       <div class="row" style="margin-top: 0.65rem;">
         <div>
@@ -768,7 +776,25 @@
         </div>
         <div>
           <label for="trailingHigherTrailStopPct">第二档回撤比例（0～1）</label>
-          <input type="number" id="trailingHigherTrailStopPct" min="0.01" max="1" step="0.01" value="0.3" />
+          <input type="number" id="trailingHigherTrailStopPct" min="0.01" max="1" step="0.01" value="0.4" />
+        </div>
+        <div>
+          <label for="trailingSecondOffsetBps">第二档限价滑点（基点）</label>
+          <input type="number" id="trailingSecondOffsetBps" min="0" max="500" step="1" value="20" placeholder="留空用全局" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 0.65rem;">
+        <div>
+          <label for="trailingThirdTrailProfit">第三档移动止盈阈值 %</label>
+          <input type="number" id="trailingThirdTrailProfit" min="0" step="0.1" value="2.1" />
+        </div>
+        <div>
+          <label for="trailingThirdTrailStopPct">第三档回撤比例（0～1）</label>
+          <input type="number" id="trailingThirdTrailStopPct" min="0.01" max="1" step="0.01" value="0.5" />
+        </div>
+        <div>
+          <label for="trailingThirdOffsetBps">第三档限价滑点（基点）</label>
+          <input type="number" id="trailingThirdOffsetBps" min="0" max="500" step="1" value="30" placeholder="留空用全局" />
         </div>
       </div>
       <label for="trailingFeishuWebhook" style="margin-top: 0.75rem;">飞书 Webhook（可选）</label>
@@ -1829,6 +1855,14 @@
         const v = parseFloat(document.getElementById(id).value);
         return Number.isFinite(v) ? v : NaN;
       };
+      const numOpt = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const v = el.value.trim();
+        if (v === "") return null;
+        const f = parseFloat(v);
+        return Number.isFinite(f) ? f : null;
+      };
       return {
         priceSource: document.getElementById("trailingPriceSource")?.value || "mark",
         monitorInterval: num("trailingMonitorInterval"),
@@ -1836,12 +1870,18 @@
         stopLossPct: num("trailingStopLossPct"),
         takeProfitMode: document.getElementById("trailingTakeProfitMode")?.value || "track",
         limitOffsetBps: num("trailingTrackLimitOffsetBps"),
+        lowOffsetBps: numOpt("trailingLowOffsetBps"),
+        firstOffsetBps: numOpt("trailingFirstOffsetBps"),
+        secondOffsetBps: numOpt("trailingSecondOffsetBps"),
+        thirdOffsetBps: numOpt("trailingThirdOffsetBps"),
         lowTrailProfit: num("trailingLowTrailProfit"),
         lowTrailStop: num("trailingLowTrailStop"),
         firstTrailProfit: num("trailingFirstTrailProfit"),
         trailStopLossPct: num("trailingTrailStopLossPct"),
         secondTrailProfit: num("trailingSecondTrailProfit"),
         higherTrailStopPct: num("trailingHigherTrailStopPct"),
+        thirdTrailProfit: num("trailingThirdTrailProfit"),
+        thirdTrailStopPct: num("trailingThirdTrailStopPct"),
         feishuWebhook: document.getElementById("trailingFeishuWebhook").value.trim() || "",
         blacklist: document.getElementById("trailingBlacklist").value.trim() || "",
       };
@@ -1857,12 +1897,18 @@
       setVal("trailingStopLossPct", vals.stopLossPct);
       setVal("trailingTakeProfitMode", vals.takeProfitMode);
       setVal("trailingTrackLimitOffsetBps", vals.limitOffsetBps);
+      setVal("trailingLowOffsetBps", vals.lowOffsetBps);
+      setVal("trailingFirstOffsetBps", vals.firstOffsetBps);
+      setVal("trailingSecondOffsetBps", vals.secondOffsetBps);
+      setVal("trailingThirdOffsetBps", vals.thirdOffsetBps);
       setVal("trailingLowTrailProfit", vals.lowTrailProfit);
       setVal("trailingLowTrailStop", vals.lowTrailStop);
       setVal("trailingFirstTrailProfit", vals.firstTrailProfit);
       setVal("trailingTrailStopLossPct", vals.trailStopLossPct);
       setVal("trailingSecondTrailProfit", vals.secondTrailProfit);
       setVal("trailingHigherTrailStopPct", vals.higherTrailStopPct);
+      setVal("trailingThirdTrailProfit", vals.thirdTrailProfit);
+      setVal("trailingThirdTrailStopPct", vals.thirdTrailStopPct);
       setVal("trailingFeishuWebhook", vals.feishuWebhook);
       setVal("trailingBlacklist", vals.blacklist);
     }
@@ -3025,6 +3071,14 @@
         return Number.isFinite(v) ? v : NaN;
       };
       const _ps = document.getElementById("trailingPriceSource")?.value || "mark";
+      const numOpt = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const v = el.value.trim();
+        if (v === "") return null;
+        const f = parseFloat(v);
+        return Number.isFinite(f) ? f : null;
+      };
       const body = {
         secret: getSecret(),
         account_id,
@@ -3033,15 +3087,21 @@
         take_profit_mode:
           document.getElementById("trailingTakeProfitMode")?.value || "track",
         limit_offset_bps: num("trailingTrackLimitOffsetBps"),
+        low_offset_bps: numOpt("trailingLowOffsetBps"),
+        first_offset_bps: numOpt("trailingFirstOffsetBps"),
+        second_offset_bps: numOpt("trailingSecondOffsetBps"),
+        third_offset_bps: numOpt("trailingThirdOffsetBps"),
         idle_no_position_sec: num("trailingIdleNoPosition"),
         monitor_interval: num("trailingMonitorInterval"),
         stop_loss_pct: num("trailingStopLossPct"),
         low_trail_stop_loss_pct: num("trailingLowTrailStop"),
         trail_stop_loss_pct: num("trailingTrailStopLossPct"),
         higher_trail_stop_loss_pct: num("trailingHigherTrailStopPct"),
+        third_trail_stop_loss_pct: num("trailingThirdTrailStopPct"),
         low_trail_profit_threshold: num("trailingLowTrailProfit"),
         first_trail_profit_threshold: num("trailingFirstTrailProfit"),
         second_trail_profit_threshold: num("trailingSecondTrailProfit"),
+        third_trail_profit_threshold: num("trailingThirdTrailProfit"),
         feishu_webhook: document.getElementById("trailingFeishuWebhook").value.trim() || null,
         blacklist: document.getElementById("trailingBlacklist").value.trim() || null,
       };
@@ -3071,8 +3131,12 @@
         setLoading(btn, false);
         return;
       }
-      if (body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 || body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1) {
-        if (hint) hint.textContent = "两档回撤比例须在 0～1 之间（如 0.3）";
+      if (
+        body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 ||
+        body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1 ||
+        body.third_trail_stop_loss_pct <= 0 || body.third_trail_stop_loss_pct > 1
+      ) {
+        if (hint) hint.textContent = "三档回撤比例须在 0～1 之间（如 0.3）";
         setLoading(btn, false);
         return;
       }

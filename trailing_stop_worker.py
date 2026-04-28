@@ -87,6 +87,8 @@ class TrailingStopWorker:
         low_trail_profit_threshold: float,
         first_trail_profit_threshold: float,
         second_trail_profit_threshold: float,
+        third_trail_profit_threshold: float = 2.1,
+        third_trail_stop_loss_pct: float = 0.5,
         feishu_webhook: str | None = None,
         blacklist: set[str] | None = None,
         status_hook: Callable[[str], None] | None = None,
@@ -94,6 +96,10 @@ class TrailingStopWorker:
         use_last_price_only: bool = False,
         close_mode: str = "market",
         limit_offset_bps: float = 25.0,
+        low_offset_bps: float | None = None,
+        first_offset_bps: float | None = None,
+        second_offset_bps: float | None = None,
+        third_offset_bps: float | None = None,
         trailing_exec: str = "signal",
         exchange_algo_type: str = "stop_market",
         testnet: bool = False,
@@ -110,7 +116,25 @@ class TrailingStopWorker:
         if cm == "limit":
             cm = "limit_ioc"
         self.close_mode = cm if cm in ("market", "limit_ioc") else "market"
+        # 全局基线 bps（仅在没传分档 bps 时使用）
         self.limit_offset_bps = max(0.0, float(limit_offset_bps))
+        # 各档独立 limit_offset_bps（None 时回退到 limit_offset_bps）
+        self.low_offset_bps = (
+            max(0.0, float(low_offset_bps)) if low_offset_bps is not None
+            else self.limit_offset_bps
+        )
+        self.first_offset_bps = (
+            max(0.0, float(first_offset_bps)) if first_offset_bps is not None
+            else self.limit_offset_bps
+        )
+        self.second_offset_bps = (
+            max(0.0, float(second_offset_bps)) if second_offset_bps is not None
+            else self.limit_offset_bps
+        )
+        self.third_offset_bps = (
+            max(0.0, float(third_offset_bps)) if third_offset_bps is not None
+            else self.limit_offset_bps
+        )
         te = (trailing_exec or "signal").strip().lower()
         self.exchange_sync_stop = te in ("exchange_stop", "exchange", "stop")
         eat = (exchange_algo_type or "stop_market").strip().lower()
@@ -124,9 +148,11 @@ class TrailingStopWorker:
         self.low_trail_stop_loss_pct = float(low_trail_stop_loss_pct)
         self.trail_stop_loss_pct = float(trail_stop_loss_pct)
         self.higher_trail_stop_loss_pct = float(higher_trail_stop_loss_pct)
+        self.third_trail_stop_loss_pct = float(third_trail_stop_loss_pct)
         self.low_trail_profit_threshold = float(low_trail_profit_threshold)
         self.first_trail_profit_threshold = float(first_trail_profit_threshold)
         self.second_trail_profit_threshold = float(second_trail_profit_threshold)
+        self.third_trail_profit_threshold = float(third_trail_profit_threshold)
         self.feishu_webhook = (feishu_webhook or "").strip() or None
         self.blacklist = blacklist or set()
         self.status_hook = status_hook
@@ -136,6 +162,13 @@ class TrailingStopWorker:
         self.detected_positions: set[str] = set()
         self._last_refresh_time: dict[str, float] = {}
         self._last_tier_sig: dict[str, str] = {}
+        # 条件单触发后的兜底跟踪：symbol → 首次检测到"应当触发"的时刻
+        self._post_trigger_grace: dict[str, float] = {}
+        # 触发未成交后的市价兜底等待秒数（IOC 失败后等待此时间再强制平仓）
+        self._post_trigger_grace_sec: float = 3.0
+        # 价格穿透限价多少百分比时立即市价兜底（不等 grace 秒）
+        # 例如 0.1 表示现价低于限价 0.1% → 限价单不可能成交，立即市价
+        self._post_trigger_breach_pct: float = 0.1
 
         self._notify_queue: queue.Queue = queue.Queue(maxsize=200)
         self._notify_failures = 0
@@ -152,6 +185,7 @@ class TrailingStopWorker:
         self._price_feed_thread: threading.Thread | None = None
         self._price_feed_data: dict[str, Any] | None = None
         self._price_feed_data_ts: float = 0.0  # 修复：增加价格数据时间戳
+        self._last_direct_fetch_ts: float = 0.0  # WS直连模式下直接fetch_tickers的冷却时间戳
 
         # WebSocket 价格订阅
         self._websocket_feed: Any | None = None
@@ -330,7 +364,7 @@ class TrailingStopWorker:
                 self._start_websocket_feed(list(current_symbols))
 
     def _price_feed_loop(self, interval: float) -> None:
-        """独立行情线程：每 interval 秒批量拉一次最新价，存入 _price_feed_data。
+        """独立行情线程：每 interval 秒按持仓拉一次最新价，存入 _price_feed_data。
         WebSocket 正常时闲置（每 5s 检查一次）；WebSocket 失效时降级到 REST API，
         间隔不低于 3.0s 以避免触发交易所 API 限频。"""
         consecutive_errors = 0
@@ -338,18 +372,27 @@ class TrailingStopWorker:
         while not self._price_feed_stop.is_set():
             start_time = time.time()
 
-            if self._websocket_feed and self._websocket_feed.is_connected():
+            if self._websocket_feed and self._websocket_feed.is_connected() and self._websocket_feed.has_received_data():
+                if self._price_feed_stop.wait(timeout=5.0):
+                    break
+                continue
+
+            # 仅拉取当前订阅币种，减少流量与 weight
+            target_syms = list(self._subscribed_symbols) if self._subscribed_symbols else []
+            if not target_syms:
                 if self._price_feed_stop.wait(timeout=5.0):
                     break
                 continue
 
             try:
-                tickers = self.exchange.fetch_tickers()
-                if isinstance(tickers, dict):
+                tickers = self._fetch_tickers_for(target_syms)
+                if tickers:
                     with self.price_lock:
                         self._price_feed_data = tickers
                         self._price_feed_data_ts = time.time()
                     consecutive_errors = 0
+                else:
+                    consecutive_errors += 1
             except Exception as e:
                 consecutive_errors += 1
                 wait = min(consecutive_errors, 5)
@@ -440,7 +483,21 @@ class TrailingStopWorker:
             return highest_profit * (1.0 - self.trail_stop_loss_pct)
         if current_tier == "第二档移动止盈":
             return highest_profit * (1.0 - self.higher_trail_stop_loss_pct)
+        if current_tier == "第三档移动止盈":
+            return highest_profit * (1.0 - self.third_trail_stop_loss_pct)
         return None
+
+    def _tier_offset_bps(self, current_tier: str) -> float:
+        """根据档位返回限价滑点 bps（仅 stop_limit 模式使用）。"""
+        if current_tier == "低档保护止盈":
+            return self.low_offset_bps
+        if current_tier == "第一档移动止盈":
+            return self.first_offset_bps
+        if current_tier == "第二档移动止盈":
+            return self.second_offset_bps
+        if current_tier == "第三档移动止盈":
+            return self.third_offset_bps
+        return self.limit_offset_bps
 
     def _batch_ticker_price(self, symbol: str, fallback: float) -> float:
         """从 _batch_tickers 取最新价，仅内存读取，不发起网络请求。
@@ -496,7 +553,9 @@ class TrailingStopWorker:
             trigger = float(self.exchange.price_to_precision(symbol, trigger))
             if self.exchange_algo_type == "stop_limit":
                 tick = max(self._price_tick(symbol, market), 1e-12)
-                bps = self.limit_offset_bps / 10000.0
+                # 按档位选择对应的 bps（低5/一15/二20/三30）
+                tier_bps_value = self._tier_offset_bps(current_tier)
+                bps = tier_bps_value / 10000.0
                 # 多头平多：卖限价须明显低于触发价；标记价触发时现价常已低于触发价，过小偏移会「已触发但不成交」
                 if side == "long":
                     raw_lim = trigger * (1.0 - bps) - tick * 2
@@ -581,7 +640,9 @@ class TrailingStopWorker:
                     if self.exchange_algo_type == "stop_limit":
                         payload["type"] = "STOP"
                         payload["price"] = lim_str
-                        payload["timeInForce"] = "GTC"
+                        # IOC：触发后立即按限价成交，未成交则取消（避免 GTC 卡死）
+                        # 配合 _check_post_trigger_safety 在 IOC 失败后市价兜底
+                        payload["timeInForce"] = "IOC"
                     else:
                         payload["type"] = "STOP_MARKET"
                     raw = self.exchange.request(
@@ -602,13 +663,16 @@ class TrailingStopWorker:
                     }
                     amt = float(qty_str)
                     if self.exchange_algo_type == "stop_limit":
+                        # OKX 计划委托 (ordType=trigger) 不接受 timeInForce 参数，
+                        # 触发后默认 GTC 行为；如果限价不成交，由
+                        # _check_post_trigger_safety 在 grace 期后市价兜底
                         order = self.exchange.create_order(
                             symbol,
                             "limit",
                             side_ccxt,
                             amt,
                             float(lim_str),
-                            {**co_params, "timeInForce": "GTC"},
+                            co_params,
                         )
                     else:
                         order = self.exchange.create_order(
@@ -653,6 +717,94 @@ class TrailingStopWorker:
                 symbol,
                 e,
             )
+
+    def _check_post_trigger_safety(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        cur_last: float,
+        cur_mark: float,
+        profit_pct: float,
+        tier_ex_th: float | None,
+        current_tier: str | None = None,
+    ) -> bool:
+        """条件单触发后的成交检查：双条件兜底。
+
+        条件 A（价格穿透）：现价已经穿透限价 N%（默认 0.1%）→ 立即市价
+            原理：IOC 失败的本质是"现价已低于（多）/高于（空）限价"，
+            此时限价单物理上不可能成交，无需等待 grace 计时
+        条件 B（计时兜底）：触发后超过 grace_sec（默认 3s）持仓仍存在 → 市价
+            兜底中的兜底，处理网络/撮合异常等情况
+
+        返回 True 表示已强制平仓。
+        """
+        if not self.exchange_sync_stop or tier_ex_th is None:
+            self._post_trigger_grace.pop(symbol, None)
+            return False
+        if symbol not in self._algo_trailing_id:
+            self._post_trigger_grace.pop(symbol, None)
+            return False
+
+        triggered_now = profit_pct <= tier_ex_th + 1.0e-9
+        if not triggered_now:
+            # 行情回升，未触发，清空 grace 状态
+            self._post_trigger_grace.pop(symbol, None)
+            return False
+
+        # 解析上次挂单的限价（_last_trigger_tp_str 格式：'stop_limit|trigger|limit'）
+        sig = self._last_trigger_tp_str.get(symbol, "")
+        limit_px = 0.0
+        if sig:
+            parts = sig.split("|")
+            if len(parts) >= 3:
+                try:
+                    limit_px = float(parts[2])
+                except (ValueError, TypeError):
+                    limit_px = 0.0
+
+        # 条件 A：价格穿透
+        breach_pct = self._post_trigger_breach_pct / 100.0
+        ref_price = cur_last if self.use_last_price else cur_mark
+        breach_triggered = False
+        if limit_px > 0 and ref_price > 0 and breach_pct > 0:
+            if side == "long":
+                # 平多挂单是 SELL @ limit_px；现价低于 limit_px*(1-breach) 即穿透
+                breach_triggered = ref_price < limit_px * (1.0 - breach_pct)
+            else:
+                # 平空挂单是 BUY @ limit_px；现价高于 limit_px*(1+breach) 即穿透
+                breach_triggered = ref_price > limit_px * (1.0 + breach_pct)
+
+        # 条件 B：计时兜底
+        now = time.time()
+        grace_start = self._post_trigger_grace.get(symbol)
+        if grace_start is None:
+            self._post_trigger_grace[symbol] = now
+            grace_start = now
+        elapsed = now - grace_start
+        time_triggered = elapsed >= self._post_trigger_grace_sec
+
+        if not breach_triggered and not time_triggered:
+            return False
+
+        reason = "价格穿透" if breach_triggered else f"超时{elapsed:.1f}s"
+        logger.warning(
+            "移动止盈[%s] %s 条件单触发后 %s 强制市价平仓 "
+            "(profit=%.3f%% line=%.3f%% 现价=%.6f 限价=%.6f)",
+            self.account_id, symbol, reason,
+            profit_pct, tier_ex_th, ref_price, limit_px,
+        )
+        signal_price = cur_last if self.use_last_price else cur_mark
+        closed = self.close_position(
+            symbol,
+            qty,
+            "sell" if side == "long" else "buy",
+            signal_price=signal_price,
+            current_tier=current_tier,
+        )
+        if closed:
+            self._post_trigger_grace.pop(symbol, None)
+        return closed
 
     def _blacklisted(self, unified_symbol: str) -> bool:
         u = self._norm_key(unified_symbol)
@@ -735,6 +887,53 @@ class TrailingStopWorker:
                     )
                     raise
 
+    def _fetch_tickers_for(self, symbols: list[str]) -> dict[str, dict[str, Any]] | None:
+        """按持仓的少量 symbol 拉取 ticker，减少流量与权重消耗。
+
+        Binance: fetch_tickers(symbols=[...]) 走 GET /fapi/v1/ticker/price 批量
+        OKX: fetch_tickers(symbols=[...]) ccxt 内部按 instId 批量。
+        若交易所不支持按 symbols 批量（极少数情况），fall back 到全市场 fetch_tickers。
+        """
+        if not symbols:
+            return None
+        for attempt in (1, 2):
+            try:
+                with self.price_lock:
+                    try:
+                        all_tickers = self.exchange.fetch_tickers(symbols)
+                    except (TypeError, NotImplementedError):
+                        # 老版 ccxt 或个别交易所不支持 symbols 入参，退回全市场
+                        all_tickers = self.exchange.fetch_tickers()
+                if not isinstance(all_tickers, dict):
+                    return None
+                out: dict[str, dict[str, Any]] = {}
+                for sym in symbols:
+                    if sym in all_tickers:
+                        t = all_tickers[sym]
+                        last = t.get("last") or t.get("close") or t.get("mark")
+                        mark = t.get("mark") or t.get("last") or t.get("close")
+                        if last:
+                            out[sym] = {
+                                "last": last,
+                                "close": last,
+                                "mark": mark or last,
+                            }
+                return out or None
+            except Exception as e:
+                if attempt == 1:
+                    logger.warning(
+                        "移动止盈[%s] 按需 fetch_tickers(%d个) 失败(%s)，重试",
+                        self.account_id, len(symbols), e,
+                    )
+                    time.sleep(0.15)
+                else:
+                    logger.warning(
+                        "移动止盈[%s] 按需 fetch_tickers 连续失败: %s",
+                        self.account_id, e,
+                    )
+                    return None
+        return None
+
     def _resolve_current_price(self, symbol: str, mark_price: float) -> float:
         """供平仓锚点/兼容旧逻辑；分档与触发请用 _conservative_pnl_pair。"""
         if not self.use_last_price:
@@ -806,10 +1005,13 @@ class TrailingStopWorker:
         side: str,
         *,
         signal_price: float | None = None,
+        current_tier: str | None = None,
     ) -> bool:
         """
         平仓：market 为纯市价；limit_ioc 为单笔 IOC 限价，不补市价（未全成则返回 False 留仓下轮再试）。
         signal_price：限价锚点，建议必传；限价模式下无有效价则不平仓。
+        current_tier：当前档位（"低档保护止盈"/"第一档移动止盈"/"第二档移动止盈"/"第三档移动止盈"/"无"），
+            用于在 limit_ioc 模式按档位选择限价滑点 bps；未传或 "无" 时回退到全局 limit_offset_bps。
         """
         try:
             if self.close_mode == "market":
@@ -845,7 +1047,9 @@ class TrailingStopWorker:
                     asks = ob.get("asks") or []
                     bid0 = float(bids[0][0]) if bids else sig
                     ask0 = float(asks[0][0]) if asks else sig
-                    bps = self.limit_offset_bps / 10000.0
+                    # 按档位选择 bps；未传档位时使用全局兜底
+                    tier_bps = self._tier_offset_bps(current_tier or "无")
+                    bps = tier_bps / 10000.0
                     if side == "sell":
                         ref = min(sig, bid0)
                         limit_px = ref * (1.0 - bps)
@@ -975,72 +1179,129 @@ class TrailingStopWorker:
 
         self._batch_tickers = None
         self._batch_tickers_ts = 0.0
+        # 记录每个 symbol 的真实数据接收时刻（来自 WS 推送）
+        self._batch_tickers_received_at: dict[str, float] = {}
+
+        # 统一判断 WebSocket TCP 连接状态，在整个方法内都可用
+        ws_connected = self._websocket_feed and self._websocket_feed.is_connected()
+        # 区分 TCP 连接与真实数据到达（TCP 连通但无数据时仍视为 REST 模式）
+        ws_has_real_data = ws_connected and self._websocket_feed.has_received_data()
 
         if self.use_last_price:
             # 优先使用 WebSocket 数据
             ws_data_available = False
-            if self._websocket_feed and self._websocket_feed.is_connected():
-                # WebSocket 已连接，直接使用其数据
+            if ws_connected:
                 ws_prices = {}
                 for sym in active_syms:
                     price_data = self._websocket_feed.get_price(sym)
                     if price_data:
-                        # 优先使用 last（成交价格），备选 mark（标记价格）
-                        # 币安：markPrice 每 3 秒推送，确保低流动性币种也有数据
-                        price = price_data.get("last") or price_data.get("mark")
-                        if price:
+                        last = price_data.get("last")
+                        mark = price_data.get("mark")
+                        # last 没收到时用 mark 兜底，反之同理（WS 内部已做兜底，这里再保险）
+                        last = last or mark
+                        mark = mark or last
+                        if last:
                             ws_prices[sym] = {
-                                "last": price,
-                                "close": price,
-                                "mark": price_data.get("mark", price),
+                                "last": last,
+                                "close": last,
+                                "mark": mark,
                             }
+                            # 优先用 last 的接收时间（来自 aggTrade），其次 mark，再次整体
+                            recv = (
+                                price_data.get("received_at_last")
+                                or price_data.get("received_at_mark")
+                                or price_data.get("received_at")
+                                or 0.0
+                            )
+                            self._batch_tickers_received_at[sym] = recv
                 if ws_prices:
                     self._batch_tickers = ws_prices
                     self._batch_tickers_ts = time.time()
                     ws_data_available = True
-                    logger.info(
-                        "移动止盈[%s] 使用 WebSocket 价格数据，%d 个币种",
-                        self.account_id,
-                        len(ws_prices)
-                    )
-                else:
-                    # WebSocket 连接正常但没有价格数据，记录诊断信息
-                    stats = self._websocket_feed.get_stats()
-                    logger.warning(
-                        "移动止盈[%s] WebSocket 连接正常但无价格数据: %s",
-                        self.account_id, stats
-                    )
 
-            # WebSocket 不可用，使用缓存或 REST API
+            # WebSocket 已连接但无直接数据，按需 fetch_tickers 获取最新价
+            # 即便 WS 仅 TCP 连通，也保留 1.0s 最小冷却避免触发交易所限频
+            if ws_connected and not ws_data_available:
+                current_ts = time.time()
+                cooldown = 1.5 if ws_has_real_data else 1.0
+                if current_ts - self._last_direct_fetch_ts >= cooldown:
+                    fetched = self._fetch_tickers_for(list(active_syms))
+                    if fetched:
+                        self._batch_tickers = fetched
+                        self._batch_tickers_ts = time.time()
+                        self._last_direct_fetch_ts = self._batch_tickers_ts
+                        for sym in fetched:
+                            self._batch_tickers_received_at[sym] = self._batch_tickers_ts
+                        ws_data_available = True
+
+                # 直接 fetch 失败或冷却中，用 _price_feed_data 兜底
+                if not ws_data_available:
+                    pf = getattr(self, "_price_feed_data", None)
+                    pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
+                    if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 5.0:
+                        ws_prices = {}
+                        for sym in active_syms:
+                            if sym in pf:
+                                ws_prices[sym] = pf[sym]
+                                self._batch_tickers_received_at[sym] = pf_ts
+                        if ws_prices:
+                            self._batch_tickers = ws_prices
+                            self._batch_tickers_ts = pf_ts
+                            ws_data_available = True
+
+            # WebSocket 不可用或以上路径均无数据，使用 REST API（按持仓按需拉取）
             if not ws_data_available:
                 pf = getattr(self, "_price_feed_data", None)
                 pf_ts = getattr(self, "_price_feed_data_ts", 0.0)
                 current_ts = time.time()
 
+                # 优先用未过期的独立行情线程数据（5s 内）
+                pf_used = False
                 if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 5.0:
-                    self._batch_tickers = pf.copy()
-                    self._batch_tickers_ts = pf_ts
-                else:
-                    # 数据过期或不存在，实时获取
-                    for _attempt_tk in (1, 2):
-                        try:
-                            with self.price_lock:
-                                all_tickers = self.exchange.fetch_tickers()
-                            if isinstance(all_tickers, dict):
-                                self._batch_tickers = all_tickers.copy()
+                    sub = {sym: pf[sym] for sym in active_syms if sym in pf}
+                    if sub:
+                        self._batch_tickers = sub
+                        self._batch_tickers_ts = pf_ts
+                        for sym in sub:
+                            self._batch_tickers_received_at[sym] = pf_ts
+                        pf_used = True
+
+                # _price_feed_data 过期或缺失：按需 fetch_tickers
+                # 加冷却保护：WS 长期失效时避免 0.3s 一次的循环里反复打 REST
+                if not pf_used:
+                    cooldown = 1.0
+                    if current_ts - self._last_direct_fetch_ts >= cooldown:
+                        for _attempt_tk in (1, 2):
+                            fetched = self._fetch_tickers_for(list(active_syms))
+                            if fetched:
+                                self._batch_tickers = fetched
                                 self._batch_tickers_ts = time.time()
-                            break
-                        except Exception as e:
-                            self._batch_tickers = None
-                            self._batch_tickers_ts = 0.0
-                            log_msg = (
-                                "移动止盈[%s] 批量获取最新价失败(%s)，200ms后重试"
-                                if _attempt_tk == 1
-                                else "移动止盈[%s] 批量获取最新价连续失败，改用标记价: %s"
-                            )
-                            logger.warning(log_msg, self.account_id, e)
+                                self._last_direct_fetch_ts = self._batch_tickers_ts
+                                for sym in fetched:
+                                    self._batch_tickers_received_at[sym] = self._batch_tickers_ts
+                                break
                             if _attempt_tk == 1:
+                                logger.warning(
+                                    "移动止盈[%s] 按需获取最新价失败，200ms后重试",
+                                    self.account_id,
+                                )
                                 time.sleep(0.2)
+                            else:
+                                logger.warning(
+                                    "移动止盈[%s] 按需获取最新价连续失败，改用标记价",
+                                    self.account_id,
+                                )
+                                self._batch_tickers = None
+                                self._batch_tickers_ts = 0.0
+                    else:
+                        # 冷却期：尽量用过期的 _price_feed_data 兜底（虽然超过 5s 但聊胜于无）
+                        if pf is not None and isinstance(pf, dict):
+                            sub = {sym: pf[sym] for sym in active_syms if sym in pf}
+                            if sub:
+                                self._batch_tickers = sub
+                                self._batch_tickers_ts = pf_ts
+                                for sym in sub:
+                                    self._batch_tickers_received_at[sym] = pf_ts
 
         for position in positions:
             symbol, position_amt, entry_price, mark_price, side = _parse_position_row(
@@ -1091,7 +1352,9 @@ class TrailingStopWorker:
                 self.highest_profits[symbol] = highest_profit
 
             current_tier = self.current_tiers.get(symbol, "无")
-            if highest_profit >= self.second_trail_profit_threshold:
+            if highest_profit >= self.third_trail_profit_threshold:
+                current_tier = "第三档移动止盈"
+            elif highest_profit >= self.second_trail_profit_threshold:
                 current_tier = "第二档移动止盈"
             elif highest_profit >= self.first_trail_profit_threshold:
                 current_tier = "第一档移动止盈"
@@ -1101,12 +1364,15 @@ class TrailingStopWorker:
                 current_tier = "无"
             self.current_tiers[symbol] = current_tier
 
-            # 修复：增加价格数据时间戳和来源信息，便于调试
-            data_age = time.time() - self._batch_tickers_ts if self._batch_tickers_ts > 0 else -1
+            # 数据延迟：优先用 per-symbol 真实接收时间（来自 WS 推送的 received_at）
+            recv_map = getattr(self, "_batch_tickers_received_at", None)
+            recv_at = recv_map.get(symbol, 0.0) if recv_map else 0.0
+            if recv_at <= 0 and self._batch_tickers_ts > 0:
+                recv_at = self._batch_tickers_ts
+            data_age = time.time() - recv_at if recv_at > 0 else -1
 
-            # 显示数据来源：WebSocket 或 REST
-            ws_connected = self._websocket_feed and self._websocket_feed.is_connected()
-            source_tag = "WS" if ws_connected else "REST"
+            # 显示数据来源：WS=真实WebSocket推送数据，REST=REST API回落
+            source_tag = "WS" if ws_has_real_data else "REST"
 
             if self.use_last_price:
                 line = (
@@ -1153,6 +1419,17 @@ class TrailingStopWorker:
                             highest_profit,
                             _profit_pct=profit_pct,
                         )
+
+                    # IOC 限价条件单触发后兜底检查：未成交 N 秒后强制市价平仓
+                    if self.exchange_algo_type == "stop_limit":
+                        if self._check_post_trigger_safety(
+                            symbol, side, position_amt,
+                            _last_px, mark_px, profit_pct, tier_ex_th,
+                            current_tier=current_tier,
+                        ):
+                            continue
+                else:
+                    self._post_trigger_grace.pop(symbol, None)
             elif current_tier == "低档保护止盈":
                 # 与交易所路径一致：仅按「峰值×回撤」与底线取 max，不再用当前浮盈贴价
                 low_eff = self._tier_profit_exit_threshold(
@@ -1171,6 +1448,7 @@ class TrailingStopWorker:
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=signal_price,
+                        current_tier=current_tier,
                     ):
                         continue
 
@@ -1189,6 +1467,7 @@ class TrailingStopWorker:
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=signal_price,
+                        current_tier=current_tier,
                     ):
                         continue
 
@@ -1209,6 +1488,28 @@ class TrailingStopWorker:
                         position_amt,
                         "sell" if side == "long" else "buy",
                         signal_price=signal_price,
+                        current_tier=current_tier,
+                    ):
+                        continue
+
+            if not use_ex and current_tier == "第三档移动止盈":
+                trail_stop_loss = highest_profit * (
+                    1.0 - self.third_trail_stop_loss_pct
+                )
+                if profit_pct <= trail_stop_loss:
+                    logger.info(
+                        "移动止盈[%s] %s 第三档回撤触发 threshold=%.2f%%",
+                        self.account_id,
+                        symbol,
+                        trail_stop_loss,
+                    )
+                    signal_price = _last_px if self.use_last_price else mark_px
+                    if self.close_position(
+                        symbol,
+                        position_amt,
+                        "sell" if side == "long" else "buy",
+                        signal_price=signal_price,
+                        current_tier=current_tier,
                     ):
                         continue
 
@@ -1220,11 +1521,14 @@ class TrailingStopWorker:
                     profit_pct,
                 )
                 signal_price = _last_px if self.use_last_price else mark_px
+                # 止损不属于分档止盈，传 current_tier 让其按当前档位 bps；
+                # 若当前是"无"档（持仓刚开亏损）则回退到全局 limit_offset_bps
                 if self.close_position(
                     symbol,
                     position_amt,
                     "sell" if side == "long" else "buy",
                     signal_price=signal_price,
+                    current_tier=current_tier,
                 ):
                     continue
 
@@ -1236,6 +1540,7 @@ class TrailingStopWorker:
                 self.detected_positions.discard(sym)
                 self._last_trigger_tp_str.pop(sym, None)
                 self._last_tier_sig.pop(sym, None)
+                self._post_trigger_grace.pop(sym, None)
 
         self._batch_tickers = None
         summary = "; ".join(lines[:12]) if lines else "无持仓或无可解析仓位"
