@@ -191,6 +191,10 @@ class TrailingStopWorker:
         self._websocket_feed: Any | None = None
         self._use_websocket = True  # 是否使用 WebSocket
         self._subscribed_symbols: set[str] = set()
+        # WS 重订阅时 simplified key → ccxt 统一格式 反向映射（_on_websocket_price_update 用）
+        self._ws_key_to_unified: dict[str, str] = {}
+        # 平滑切换标志：True 表示正在双连接切换中，避免重入
+        self._ws_switching: bool = False
 
     def _norm_key(self, unified_symbol: str) -> str:
         return self._norm(unified_symbol)
@@ -250,6 +254,31 @@ class TrailingStopWorker:
             )
             return False
 
+    @staticmethod
+    def _ws_simplified_key(symbol: str) -> str:
+        """与 WebSocket 内部 normalize 一致：'OPG/USDT:USDT' → 'OPGUSDT'。
+        用于把 WS 回调时收到的 simplified key 反查回 ccxt 统一格式。"""
+        return (
+            symbol.upper()
+            .replace('/USDT', 'USDT').replace(':USDT', '')
+            .replace('/USD', 'USD').replace(':USD', '')
+        )
+
+    def _pf_lookup(self, pf: dict, sym: str) -> dict | None:
+        """在 _price_feed_data 中查找指定 symbol，同时兼容 ccxt 格式与 simplified key。
+
+        WS 重订阅瞬间，旧数据可能用旧版本 simplified key，新代码用 ccxt key，
+        先按 ccxt 格式查（新数据），再回退到 simplified（向后兼容）。
+        """
+        if not pf:
+            return None
+        if sym in pf:
+            return pf[sym]
+        simp = self._ws_simplified_key(sym)
+        if simp in pf:
+            return pf[simp]
+        return None
+
     def _start_websocket_feed(self, symbols: list[str]):
         """启动 WebSocket 价格订阅"""
         if not self._use_websocket:
@@ -269,6 +298,13 @@ class TrailingStopWorker:
             if self._websocket_feed:
                 self._websocket_feed.start()
                 self._subscribed_symbols = set(symbols)
+                # 建立 simplified key → ccxt 统一格式 的反向映射
+                # 让 WS 回调写入 _price_feed_data 时使用与 active_syms 一致的 key，
+                # 否则 fallback 路径 `if sym in pf` 永远不命中，pf 兜底失效，
+                # 导致 WS 重订阅瞬间被迫走 fetch_tickers 拉到陈旧 last 价。
+                self._ws_key_to_unified = {
+                    self._ws_simplified_key(s): s for s in symbols
+                }
                 logger.info(
                     "移动止盈[%s] WebSocket 价格订阅已启动，订阅 %d 个币种",
                     self.account_id,
@@ -290,7 +326,18 @@ class TrailingStopWorker:
             self._websocket_feed = None
 
     def _on_websocket_price_update(self, symbol: str, price_data: dict):
-        """WebSocket 价格更新回调"""
+        """WebSocket 价格更新回调
+
+        WS 内部传入的 symbol 是 simplified key（如 'OPGUSDT'），
+        但其他模块（fallback 兜底等）使用的是 ccxt 统一格式（如 'OPG/USDT:USDT'）。
+        通过 _ws_key_to_unified 反向映射，让 _price_feed_data 始终用 ccxt key，
+        避免 key 不匹配导致 fallback 路径永远不命中。
+        """
+        unified = symbol
+        mapping = getattr(self, "_ws_key_to_unified", None)
+        if mapping and symbol in mapping:
+            unified = mapping[symbol]
+
         # 将 WebSocket 数据格式转换为与 fetch_tickers 一致
         ticker_data = {}
 
@@ -303,11 +350,17 @@ class TrailingStopWorker:
             # 用于计算浮盈和触发移动止盈
             ticker_data["mark"] = price_data["mark"]
 
+        # 透传 WS 推送时间戳（per-symbol），用于精准计算 data_age
+        for k in ("received_at_last", "received_at_mark", "received_at"):
+            v = price_data.get(k)
+            if v:
+                ticker_data[k] = v
+
         if ticker_data:
             with self.price_lock:
                 if self._price_feed_data is None:
                     self._price_feed_data = {}
-                self._price_feed_data[symbol] = ticker_data
+                self._price_feed_data[unified] = ticker_data
                 self._price_feed_data_ts = time.time()
 
     def _stop_websocket_feed(self):
@@ -330,8 +383,12 @@ class TrailingStopWorker:
                 self._subscribed_symbols = set()
 
     def _update_websocket_symbols(self, symbols: list[str]):
-        """更新 WebSocket 订阅的币种列表"""
+        """更新 WebSocket 订阅的币种列表（平滑切换，避免空窗期）"""
         if not self._use_websocket:
+            return
+
+        # 正在平滑切换中，本次跳过；下一轮 monitor 会再次检测
+        if getattr(self, "_ws_switching", False):
             return
 
         current_symbols = set(symbols)
@@ -345,7 +402,20 @@ class TrailingStopWorker:
             self._start_websocket_feed(list(current_symbols))
             return
 
-        # WebSocket 已启动，检查币种变化
+        # 持仓清空，关闭 WebSocket（无需平滑切换）
+        if self._websocket_feed and not current_symbols:
+            for sym in list(self._subscribed_symbols):
+                self.highest_profits.pop(sym, None)
+                self.current_tiers.pop(sym, None)
+                self.detected_positions.discard(sym)
+            logger.info(
+                "移动止盈[%s] 持仓全部清空，关闭 WebSocket",
+                self.account_id
+            )
+            self._stop_websocket_feed()
+            return
+
+        # WebSocket 已启动，检查币种变化 → 平滑切换
         if self._websocket_feed and current_symbols != self._subscribed_symbols:
             # 清理不再持仓的币种数据，防止内存泄漏
             removed_symbols = self._subscribed_symbols - current_symbols
@@ -354,14 +424,119 @@ class TrailingStopWorker:
                 self.current_tiers.pop(sym, None)
                 self.detected_positions.discard(sym)
                 logger.info("移动止盈[%s] 清理已平仓币种数据: %s", self.account_id, sym)
-            
-            logger.info(
-                "移动止盈[%s] 持仓币种变化，重新订阅 WebSocket",
-                self.account_id
+
+            self._smooth_switch_websocket(list(current_symbols))
+
+    def _smooth_switch_websocket(self, new_symbols: list[str]):
+        """平滑切换 WebSocket：先启动新连接、等首条数据后再关闭旧连接。
+
+        老方案 stop()+start() 会产生 0.3~1s 的"WS 空窗期"，
+        在此期间 monitor 走 fetch_tickers fallback，
+        OKX REST tickers 端点对小币种存在陈旧/缓存延迟问题，
+        曾导致 OPG 拉到错误 last 价 → 错误进档 → 错误平仓。
+
+        本方案双连接 0.5~1s：
+        1. 启动新 WS（旧 WS 仍主导，monitor 继续从旧 WS 取数据）
+        2. 同步更新 _ws_key_to_unified 映射（覆盖新增币种）
+        3. 后台线程等新 WS 收到首条数据（或 5s 超时）
+        4. 原子替换 self._websocket_feed → 新 WS
+        5. 关闭旧 WS
+        """
+        old_feed = self._websocket_feed
+        new_feed = None
+        try:
+            from websocket_price_feed import create_websocket_feed
+
+            exchange_id = getattr(self.exchange, "id", "")
+            new_feed = create_websocket_feed(
+                exchange_id=exchange_id,
+                symbols=new_symbols,
+                on_price_update=self._on_websocket_price_update,
+                testnet=self.testnet,
             )
+            if not new_feed:
+                logger.warning(
+                    "移动止盈[%s] 平滑切换：新 WebSocket 创建失败，降级为 stop+start",
+                    self.account_id,
+                )
+                self._stop_websocket_feed()
+                self._start_websocket_feed(new_symbols)
+                return
+
+            # 提前更新映射（旧 WS 推送的币种仍在新映射中，新增币种也在）
+            # 旧 WS 不会推送 new_symbols 中独有的币种，所以双连接期间映射对两边都正确。
+            self._ws_key_to_unified = {
+                self._ws_simplified_key(s): s for s in new_symbols
+            }
+            new_feed.start()
+            logger.info(
+                "移动止盈[%s] 平滑切换：新 WebSocket 已启动(%d 币种)，"
+                "旧 WS 继续工作，等待首条数据后切换",
+                self.account_id, len(new_symbols),
+            )
+        except Exception as e:
+            logger.error(
+                "移动止盈[%s] 平滑切换：启动新 WebSocket 失败: %s，降级为 stop+start",
+                self.account_id, e,
+            )
+            try:
+                if new_feed:
+                    new_feed.stop()
+            except Exception:
+                pass
             self._stop_websocket_feed()
-            if current_symbols:  # 只有还有持仓才重新订阅
-                self._start_websocket_feed(list(current_symbols))
+            self._start_websocket_feed(new_symbols)
+            return
+
+        self._ws_switching = True
+
+        def _switcher():
+            try:
+                deadline = time.time() + 5.0  # 5 秒超时强制切换
+                ready = False
+                while time.time() < deadline:
+                    if new_feed.has_received_data():
+                        ready = True
+                        break
+                    time.sleep(0.05)
+
+                if ready:
+                    elapsed_ms = (5.0 - max(0.0, deadline - time.time())) * 1000.0
+                    logger.info(
+                        "移动止盈[%s] 平滑切换：新 WS 收到首条数据(耗时%.0fms)，原子切换",
+                        self.account_id, elapsed_ms,
+                    )
+                else:
+                    logger.warning(
+                        "移动止盈[%s] 平滑切换：5s 内新 WS 未收到数据，强制切换",
+                        self.account_id,
+                    )
+
+                # 原子替换主引用（GIL 保证 monitor 读到的要么旧、要么新，无中间态）
+                self._websocket_feed = new_feed
+                self._subscribed_symbols = set(new_symbols)
+
+                # 关闭旧 WS
+                if old_feed:
+                    try:
+                        old_feed.stop()
+                        logger.info(
+                            "移动止盈[%s] 平滑切换完成，旧 WebSocket 已关闭",
+                            self.account_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "移动止盈[%s] 平滑切换：关闭旧 WS 失败: %s",
+                            self.account_id, e,
+                        )
+            finally:
+                self._ws_switching = False
+
+        threading.Thread(
+            target=_switcher,
+            daemon=True,
+            name=f"ws-smooth-switch-{self.account_id}",
+        ).start()
 
     def _price_feed_loop(self, interval: float) -> None:
         """独立行情线程：每 interval 秒按持仓拉一次最新价，存入 _price_feed_data。
@@ -1243,9 +1418,17 @@ class TrailingStopWorker:
                     if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 5.0:
                         ws_prices = {}
                         for sym in active_syms:
-                            if sym in pf:
-                                ws_prices[sym] = pf[sym]
-                                self._batch_tickers_received_at[sym] = pf_ts
+                            entry = self._pf_lookup(pf, sym)
+                            if entry:
+                                ws_prices[sym] = entry
+                                # 优先用 per-symbol 推送时间戳，缺失则用整体 pf_ts
+                                recv = (
+                                    entry.get("received_at_last")
+                                    or entry.get("received_at_mark")
+                                    or entry.get("received_at")
+                                    or pf_ts
+                                )
+                                self._batch_tickers_received_at[sym] = recv
                         if ws_prices:
                             self._batch_tickers = ws_prices
                             self._batch_tickers_ts = pf_ts
@@ -1260,12 +1443,23 @@ class TrailingStopWorker:
                 # 优先用未过期的独立行情线程数据（5s 内）
                 pf_used = False
                 if pf is not None and isinstance(pf, dict) and (current_ts - pf_ts) < 5.0:
-                    sub = {sym: pf[sym] for sym in active_syms if sym in pf}
+                    sub: dict[str, dict[str, Any]] = {}
+                    for sym in active_syms:
+                        entry = self._pf_lookup(pf, sym)
+                        if entry:
+                            sub[sym] = entry
                     if sub:
                         self._batch_tickers = sub
                         self._batch_tickers_ts = pf_ts
                         for sym in sub:
-                            self._batch_tickers_received_at[sym] = pf_ts
+                            entry = sub[sym]
+                            recv = (
+                                entry.get("received_at_last")
+                                or entry.get("received_at_mark")
+                                or entry.get("received_at")
+                                or pf_ts
+                            )
+                            self._batch_tickers_received_at[sym] = recv
                         pf_used = True
 
                 # _price_feed_data 过期或缺失：按需 fetch_tickers
