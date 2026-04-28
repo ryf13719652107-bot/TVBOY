@@ -1187,7 +1187,9 @@ class TrailingStopWorker:
         # 区分 TCP 连接与真实数据到达（TCP 连通但无数据时仍视为 REST 模式）
         ws_has_real_data = ws_connected and self._websocket_feed.has_received_data()
 
-        if self.use_last_price:
+        # 仅在「启用最新价」且「确有持仓」时才走价格获取流程；空仓直接跳过，
+        # 避免对空 active_syms 调用 _fetch_tickers_for 误触发"获取失败"日志。
+        if self.use_last_price and active_syms:
             # 优先使用 WebSocket 数据
             ws_data_available = False
             if ws_connected:
