@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+from urllib.parse import urlencode
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -344,10 +345,12 @@ def _trim_hot_logs_locked(kind: str) -> None:
         max_keep = max(1, LOG_HOT_MAX_EXECUTION)
         hot = _account_log
         archive_path = _EXECUTION_ARCHIVE_JSONL_PATH
+        jsonl_path = _EXECUTION_LOG_JSONL_PATH
     else:
         max_keep = max(1, LOG_HOT_MAX_SIGNAL)
         hot = _signal_log
         archive_path = _SIGNAL_ARCHIVE_JSONL_PATH
+        jsonl_path = _SIGNAL_LOG_JSONL_PATH
     if len(hot) <= max_keep:
         return
     overflow: list[dict[str, Any]] = []
@@ -358,6 +361,8 @@ def _trim_hot_logs_locked(kind: str) -> None:
         with open(archive_path, "a", encoding="utf-8") as f:
             for row in overflow:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    # 热数据 trim 后须重写 jsonl，避免重启从 jsonl 全量加载时已归档行「复活」
+    _rewrite_jsonl_from_newest(jsonl_path, list(hot))
 
 
 def _reload_persisted_logs() -> None:
@@ -709,6 +714,59 @@ def _futures_net_position_abs(exchange, unified_symbol: str) -> float | None:
     return 0.0
 
 
+def _futures_net_position_side(exchange, unified_symbol: str) -> str | None:
+    """U 本位合约净持仓方向：long | short | flat；查询失败为 None。"""
+    try:
+        exchange.load_markets()
+        positions = exchange.fetch_positions([unified_symbol])
+    except Exception as e:
+        logger.warning("fetch_positions 判断持仓方向失败: %s", e)
+        return None
+    if not positions:
+        return "flat"
+    matched = False
+    for p in positions:
+        if str(p.get("symbol") or "") != str(unified_symbol):
+            continue
+        matched = True
+        side = str(p.get("side") or "").lower().strip()
+        qty = 0.0
+        c = p.get("contracts")
+        if c is not None:
+            try:
+                qty = abs(float(c))
+            except (TypeError, ValueError):
+                qty = 0.0
+        info = p.get("info") or {}
+        if qty <= 0 and info.get("positionAmt") is not None:
+            try:
+                qty = abs(float(info["positionAmt"]))
+                if float(info["positionAmt"]) > 0:
+                    side = side or "long"
+                elif float(info["positionAmt"]) < 0:
+                    side = side or "short"
+            except (TypeError, ValueError):
+                qty = 0.0
+        if qty <= 0 and info.get("pos") is not None:
+            try:
+                pv = float(info["pos"])
+                qty = abs(pv)
+                if pv > 0:
+                    side = side or "long"
+                elif pv < 0:
+                    side = side or "short"
+            except (TypeError, ValueError):
+                qty = 0.0
+        if qty <= 0 or _position_effectively_zero(exchange, unified_symbol, qty):
+            return "flat"
+        if side in ("long", "short"):
+            return side
+        return None
+    if matched:
+        return "flat"
+    return "flat"
+
+
 def _position_effectively_zero(
     exchange, unified_symbol: str, pos_abs: float
 ) -> bool:
@@ -834,44 +892,260 @@ def _normalize_tv_position_side(raw: Any) -> str | None:
     return None
 
 
-def _infer_reduce_only_from_tv_context(payload: dict[str, Any], action: str) -> bool | None:
-    """
-    不修改 Pine：若告警 JSON 含 prev_market_position（与 TV 占位符），
-    则根据「上一笔持仓方向 + 本次买卖方向」推断合约是否仅减仓。
-    无法判断时返回 None（由调用方用默认 false）。
-    """
-    if BINANCE_DEFAULT_TYPE != "future":
-        return None
-    prev_raw = payload.get("prev_market_position") or payload.get(
-        "strategy.prev_market_position"
+def _parse_tv_numeric_field(payload: dict[str, Any], *keys: str) -> float | None:
+    for k in keys:
+        raw = payload.get(k)
+        if raw is None or str(raw).strip() == "":
+            continue
+        s = str(raw).strip()
+        if s.startswith("{{") and s.endswith("}}"):
+            continue
+        try:
+            return float(str(s).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _side_from_tv_position_size(payload: dict[str, Any]) -> str | None:
+    """由 TV position_size 符号推断当前策略持仓方向（prev 缺失时的兜底）。"""
+    ps = _parse_tv_numeric_field(
+        payload, "position_size", "strategy.position_size"
     )
-    prev = _normalize_tv_position_side(prev_raw)
+    if ps is None:
+        return None
+    if ps > 0:
+        return "long"
+    if ps < 0:
+        return "short"
+    return "flat"
+
+
+def _reduce_only_from_held_side(held: str | None, action: str) -> bool | None:
     act = (action or "").lower().strip()
-    if act not in ("buy", "sell"):
+    if act not in ("buy", "sell") or held not in ("long", "short", "flat"):
         return None
-    if prev is None:
-        return None
-    if prev == "long" and act == "sell":
+    if held == "long" and act == "sell":
         return True
-    if prev == "short" and act == "buy":
+    if held == "short" and act == "buy":
         return True
-    if prev == "long" and act == "buy":
+    if held == "flat":
         return False
-    if prev == "short" and act == "sell":
+    if held == "long" and act == "buy":
         return False
-    if prev == "flat":
+    if held == "short" and act == "sell":
         return False
     return None
 
 
-def _resolve_reduce_only(payload: dict[str, Any], action: str) -> bool:
-    """显式 reduce_only 优先；否则用 TV 持仓占位符推断；否则 False。"""
+def _tv_prev_action_suggests_reduce_only(
+    prev: str, action: str, cur: str | None
+) -> bool | None:
+    """
+    结合 prev 与成交后 market_position 判断是否纯减仓。
+    空→多 / 多→空（cur 为反向仓）返回 None，交由反手逻辑处理。
+    """
+    act = (action or "").lower().strip()
+    if prev == "short" and act == "buy":
+        if cur == "long":
+            return None
+        if cur == "flat":
+            return True
+        return None
+    if prev == "long" and act == "sell":
+        if cur == "short":
+            return None
+        if cur == "flat":
+            return True
+        return None
+    return _reduce_only_from_held_side(prev, act)
+
+
+def _exchange_opposite_position_suggests_reversal(
+    held: str, action: str, cur: str | None
+) -> bool:
+    """交易所持反向仓且 TV market_position 明确为反向新仓（非 flat / 未知）。"""
+    act = (action or "").lower().strip()
+    if held == "short" and act == "buy" and cur == "long":
+        return True
+    if held == "long" and act == "sell" and cur == "short":
+        return True
+    return False
+
+
+def _tv_payload_is_reversal(payload: dict[str, Any], action: str) -> bool:
+    """
+    TV 策略反手：空→多 / 多→空（非平仓到 flat）。
+    典型：prev=short + buy + market_position=long，或 prev=long + sell + market_position=short。
+    """
+    act = (action or "").lower().strip()
+    if act not in ("buy", "sell"):
+        return False
+    prev = _normalize_tv_position_side(
+        payload.get("prev_market_position")
+        or payload.get("strategy.prev_market_position")
+    )
+    cur = _normalize_tv_position_side(
+        payload.get("market_position")
+        or payload.get("strategy.market_position")
+    )
+    if prev == "short" and act == "buy" and cur == "long":
+        return True
+    if prev == "long" and act == "sell" and cur == "short":
+        return True
+    ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
+    if prev == "short" and act == "buy" and ps is not None and ps > 0:
+        return True
+    if prev == "long" and act == "sell" and ps is not None and ps < 0:
+        return True
+    return False
+
+
+def _reversal_target_order_qty(
+    payload: dict[str, Any], fallback_amount: float
+) -> float:
+    """
+    反手目标新仓数量：优先 abs(TV position_size)（成交后仓位）；
+    否则用 amount/contracts。Binance=标的币；OKX=张。
+    """
+    ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
+    if ps is not None and ps != 0:
+        return abs(float(ps))
+    return max(0.0, float(fallback_amount))
+
+
+def _reversal_total_order_qty(
+    exchange,
+    unified_symbol: str,
+    action: str,
+    target_qty: float,
+) -> float:
+    """反手下单量 = 现有持仓 + 目标新仓（与 fetch_positions / TV 同单位：币安=标的币，OKX=张）。"""
+    target = max(0.0, float(target_qty))
+    pos_abs = _futures_net_position_abs(exchange, unified_symbol) or 0.0
+    if pos_abs <= 0:
+        return target
+    held = _futures_net_position_side(exchange, unified_symbol)
+    act = (action or "").lower().strip()
+    if held == "short" and act == "buy":
+        return pos_abs + target
+    if held == "long" and act == "sell":
+        return pos_abs + target
+    return target
+
+
+def _infer_reduce_only_from_tv_context(payload: dict[str, Any], action: str) -> bool | None:
+    """
+    不修改 Pine：若告警 JSON 含 prev_market_position（与 TV 占位符），
+    则根据「上一笔持仓方向 + 本次买卖方向」推断合约是否仅减仓。
+    prev 缺失或未替换时，依次尝试 position_size 符号。
+    无法判断时返回 None（由调用方查交易所或默认 false）。
+    """
+    if BINANCE_DEFAULT_TYPE != "future":
+        return None
+    act = (action or "").lower().strip()
+    if act not in ("buy", "sell"):
+        return None
+
+    prev_raw = payload.get("prev_market_position") or payload.get(
+        "strategy.prev_market_position"
+    )
+    prev = _normalize_tv_position_side(prev_raw)
+    cur = _normalize_tv_position_side(
+        payload.get("market_position")
+        or payload.get("strategy.market_position")
+    )
+    if prev is not None:
+        ro = _tv_prev_action_suggests_reduce_only(prev, act, cur)
+        if ro is not None:
+            return ro
+
+    if prev_raw is not None and _normalize_tv_position_side(prev_raw) is None:
+        raw_s = str(prev_raw).strip()
+        if raw_s.startswith("{{") and raw_s.endswith("}}"):
+            logger.warning(
+                "TV prev_market_position 占位符未替换: %s，尝试 position_size / 交易所持仓",
+                raw_s[:80],
+            )
+
+    ps_side = _side_from_tv_position_size(payload)
+    if ps_side is not None and ps_side != "flat":
+        ro = _reduce_only_from_held_side(ps_side, act)
+        if ro is not None:
+            logger.info(
+                "reduce_only 由 TV position_size 推断: side=%s action=%s → %s",
+                ps_side,
+                act,
+                ro,
+            )
+            return ro
+
+    return None
+
+
+def _parse_truthy_flag(val: Any) -> bool:
+    if val is True:
+        return True
+    if val is False or val is None:
+        return False
+    s = str(val).strip().lower()
+    if s in ("", "0", "false", "no", "off"):
+        return False
+    return s in ("true", "1", "yes", "on")
+
+
+def _webhook_open_only_active(payload: dict[str, Any], settings: dict[str, Any]) -> bool:
+    """消息体 open_only 优先；未指定时读 bot_settings.webhook_open_only。"""
+    if "open_only" in payload:
+        return _parse_truthy_flag(payload.get("open_only"))
+    return bool(settings.get("webhook_open_only"))
+
+
+def _resolve_reduce_only(
+    payload: dict[str, Any],
+    action: str,
+    *,
+    exchange=None,
+    symbol: str | None = None,
+) -> bool:
+    """显式 reduce_only 优先；反手信号强制开仓方向；否则 TV 字段 / 交易所推断。"""
+    if _tv_payload_is_reversal(payload, action):
+        payload["_is_reversal"] = True
+        logger.info(
+            "TV 反手信号: prev=%s action=%s market=%s",
+            payload.get("prev_market_position"),
+            action,
+            payload.get("market_position"),
+        )
+        return False
     explicit = payload.get("reduce_only")
     if explicit is not None and str(explicit).strip() != "":
         return str(explicit).lower() in ("true", "1", "yes", "on")
     inferred = _infer_reduce_only_from_tv_context(payload, action)
     if inferred is not None:
         return inferred
+    act = (action or "").lower().strip()
+    if exchange is not None and symbol and act in ("buy", "sell"):
+        held = _futures_net_position_side(exchange, symbol)
+        if held is not None and held != "flat":
+            cur = _normalize_tv_position_side(
+                payload.get("market_position")
+                or payload.get("strategy.market_position")
+            )
+            if _exchange_opposite_position_suggests_reversal(held, act, cur):
+                payload["_is_reversal"] = True
+                logger.info(
+                    "反手由交易所持仓推断: held=%s action=%s market=%s",
+                    held,
+                    act,
+                    payload.get("market_position"),
+                )
+                return False
+            ro = _reduce_only_from_held_side(held, act)
+            if ro is not None and cur == "flat":
+                return ro
+            if ro is True and cur is None:
+                return ro
     return False
 
 
@@ -907,9 +1181,17 @@ def _parse_reduce_only_from_payload(pl: dict[str, Any]) -> bool:
     return str(v).lower() in ("true", "1", "yes", "on")
 
 
-def _service_action_label(reduce_only: bool, side: str) -> str:
+def _service_action_label(
+    reduce_only: bool, side: str, *, is_reversal: bool = False
+) -> str:
     """本服务日志：根据 reduce_only 与方向给出中文动作（合约市价跟单）。"""
     s = (side or "").lower()
+    if is_reversal:
+        if s == "buy":
+            return "反手开多"
+        if s == "sell":
+            return "反手开空"
+        return "反手"
     if reduce_only:
         if s == "sell":
             return "减仓/平多"
@@ -939,6 +1221,96 @@ def _utc_iso_from_ms(ms: float | int | None) -> str | None:
         return None
 
 
+def _record_webhook_open_only_skip(
+    t_recv: float,
+    payload: dict[str, Any],
+    action: str,
+    *,
+    infer_source: str,
+) -> None:
+    """仅开仓模式下跳过的减仓/平仓信号写入 signal_log，便于控制台排查。"""
+    recv_ms = int(t_recv * 1000)
+    ts_ms = int(time.time() * 1000)
+    entry: dict[str, Any] = {
+        "source": "webhook",
+        "received_at_ms": recv_ms,
+        "completed_at_ms": ts_ms,
+        "receive_signal_ms": round((time.time() - t_recv) * 1000, 2),
+        "execute_trade_ms": 0.0,
+        "total_trade_ms": round((time.time() - t_recv) * 1000, 2),
+        "server_latency_ms": round((time.time() - t_recv) * 1000, 2),
+        "payload": _trim_payload_for_log(payload),
+        "accounts": [],
+        "ok": True,
+        "skipped": True,
+        "skip_reason": "webhook_open_only",
+        "skip_action": action,
+        "reduce_only_inferred": True,
+        "infer_source": infer_source,
+    }
+    entry["received_at_utc"] = _utc_iso_from_ms(recv_ms)
+    entry["completed_at_utc"] = _utc_iso_from_ms(ts_ms)
+    with _LOG_LOCK:
+        _signal_log.appendleft(entry)
+        _append_jsonl_row(_SIGNAL_LOG_JSONL_PATH, entry)
+        if len(_signal_log) >= LOG_HOT_MAX_SIGNAL * 1.5:
+            _trim_hot_logs_locked("signal")
+
+
+def _webhook_should_skip_open_only(
+    payload: dict[str, Any],
+    action: str,
+    targets: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """
+    判断是否应因「仅开仓」跳过本信号。
+    返回 (是否跳过, 推断来源 tv_prev|tv_position_size|exchange|explicit)。
+    反手信号不跳过（需执行平仓+反向开仓）。
+    """
+    if _tv_payload_is_reversal(payload, action):
+        return False, ""
+
+    explicit = payload.get("reduce_only")
+    if explicit is not None and str(explicit).strip() != "":
+        if str(explicit).lower() in ("true", "1", "yes", "on"):
+            return True, "explicit"
+
+    inferred = _infer_reduce_only_from_tv_context(payload, action)
+    if inferred is True:
+        prev_ok = _normalize_tv_position_side(
+            payload.get("prev_market_position")
+            or payload.get("strategy.prev_market_position")
+        )
+        return True, "tv_prev" if prev_ok is not None else "tv_position_size"
+    if inferred is False:
+        return False, ""
+
+    sym_raw = payload.get("symbol") or payload.get("ticker")
+    if not sym_raw or not targets:
+        return False, ""
+    try:
+        account = targets[0]
+        ex = get_exchange_for_account(account, purpose="read")
+        sym = resolve_symbol(ex, normalize_symbol(str(sym_raw)))
+        cur = _normalize_tv_position_side(
+            payload.get("market_position")
+            or payload.get("strategy.market_position")
+        )
+        held = _futures_net_position_side(ex, sym)
+        if held and _exchange_opposite_position_suggests_reversal(
+            held, action, cur
+        ):
+            return False, ""
+        ro = _resolve_reduce_only(
+            payload, action, exchange=ex, symbol=sym
+        )
+        if ro:
+            return True, "exchange"
+    except Exception as e:
+        logger.warning("仅开仓：交易所持仓推断失败，不跳过本次信号: %s", e)
+    return False, ""
+
+
 def record_webhook_signal(
     t_recv: float,
     payload: dict[str, Any],
@@ -948,6 +1320,7 @@ def record_webhook_signal(
     execute_trade_ms: float,
     total_trade_ms: float,
     completed_at: float | None = None,
+    exchanges_by_id: dict[str, Any] | None = None,
 ) -> None:
     """记录一次 /webhook：多账户结果；account_results 含 account_id / remark / ok / order / error。"""
     t_done = completed_at if completed_at is not None else time.time()
@@ -972,14 +1345,7 @@ def record_webhook_signal(
         if not r.get("ok") or not r.get("order"):
             continue
         order = r["order"]
-        ex_raw = order.get("timestamp") or order.get("lastUpdateTimestamp")
-        ex_ms = None
-        if ex_raw is not None:
-            try:
-                er = float(ex_raw)
-                ex_ms = int(er) if er > 1e12 else int(er * 1000)
-            except (TypeError, ValueError):
-                ex_ms = None
+        ex_ms = _order_exchange_timestamp_ms(order)
         entry["exchange_timestamp_ms"] = ex_ms
         entry["exchange_time_utc"] = _utc_iso_from_ms(ex_ms)
         entry["order_id"] = order.get("id")
@@ -998,6 +1364,7 @@ def record_webhook_signal(
             receive_signal_ms=receive_signal_ms,
             execute_trade_ms=execute_trade_ms,
             total_trade_ms=total_trade_ms,
+            exchanges_by_id=exchanges_by_id,
         )
 
 
@@ -1034,8 +1401,47 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
         return order
 
 
-def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
-    """从 ccxt 订单对象提取列表展示用成交价、数量、手续费（若有）。"""
+def _okx_contract_size(exchange, symbol: str) -> float | None:
+    """OKX USDT 线性永续每张合约对应的标的币数量（ctVal / contractSize）。"""
+    if _exchange_id(exchange) != "okx":
+        return None
+    mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+    if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
+        return None
+    ct = float(mkt.get("contractSize") or 0)
+    return ct if ct > 0 else None
+
+
+def _order_exchange_timestamp_ms(order: dict[str, Any]) -> int | None:
+    """从 ccxt 订单对象提取交易所成交/更新时间（毫秒）。"""
+    for key in ("lastTradeTimestamp", "timestamp"):
+        raw = order.get(key)
+        if raw is not None and raw != "":
+            try:
+                er = float(raw)
+                return int(er) if er > 1e12 else int(er * 1000)
+            except (TypeError, ValueError):
+                pass
+    info = order.get("info")
+    if isinstance(info, dict):
+        for key in ("uTime", "fillTime", "cTime", "ts"):
+            raw = info.get(key)
+            if raw is not None and raw != "":
+                try:
+                    er = float(raw)
+                    return int(er) if er > 1e12 else int(er * 1000)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
+def _order_summary_for_log(
+    order: dict[str, Any] | None,
+    *,
+    exchange=None,
+    symbol: str | None = None,
+) -> dict[str, Any]:
+    """从 ccxt 订单对象提取列表展示用成交价、数量（统一为标的币）、手续费（若有）。"""
     if not order:
         return {}
     out: dict[str, Any] = {}
@@ -1087,7 +1493,7 @@ def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
         apf = _f(ap)
         if apf is not None and apf > 0 and "order_average" not in out:
             out["order_average"] = apf
-        exq = info.get("executedQty") or info.get("cumQty")
+        exq = info.get("executedQty") or info.get("cumQty") or info.get("fillSz") or info.get("accFillSz")
         exf = _f(exq)
         if exf is not None and exf > 0 and "order_filled" not in out:
             out["order_filled"] = exf
@@ -1115,6 +1521,9 @@ def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
         hpnl = _f(info.get("closedPnl"))
         if hpnl is not None:
             out["order_pnl"] = hpnl
+        okx_pnl = _f(info.get("pnl"))
+        if okx_pnl is not None and "order_pnl" not in out:
+            out["order_pnl"] = okx_pnl
 
     cost = _f(order.get("cost"))
     filled2 = out.get("order_filled") or _f(order.get("filled"))
@@ -1126,6 +1535,15 @@ def _order_summary_for_log(order: dict[str, Any] | None) -> dict[str, Any]:
         and "order_average" not in out
     ):
         out["order_average"] = cost / filled2
+
+    sym_u = symbol or str(order.get("symbol") or "")
+    ct = _okx_contract_size(exchange, sym_u) if exchange and sym_u else None
+    if ct and ct > 0 and "order_filled" in out:
+        contracts = out["order_filled"]
+        out["order_filled_contracts"] = contracts
+        out["order_filled"] = contracts * ct
+    if "order_filled" in out:
+        out["order_filled_is_base"] = True
 
     return out
 
@@ -1187,28 +1605,25 @@ def _record_account_rows_from_webhook(
     receive_signal_ms: float,
     execute_trade_ms: float,
     total_trade_ms: float,
+    exchanges_by_id: dict[str, Any] | None = None,
 ) -> None:
     pl = _trim_payload_for_log(payload)
     sym_hint = str(pl.get("symbol") or pl.get("ticker") or "")
     side_hint = str(pl.get("action") or pl.get("side") or "")
-    ro = _parse_reduce_only_from_payload(pl)
     for r in account_results:
         rid = str(r.get("account_id") or "")
         remark = str(r.get("remark") or "")
         ts_ms = int(time.time() * 1000)
         fq = r.get("used_quote_usdt", r.get("fixed_quote_usdt"))
         fq_f = float(fq) if fq is not None else None
+        is_rev = bool(r.get("_is_reversal"))
+        ro = bool(r.get("_resolved_reduce_only", False))
         if r.get("ok") and r.get("order"):
             o = r["order"]
-            ex_raw = o.get("timestamp") or o.get("lastUpdateTimestamp")
-            ex_ms = None
-            if ex_raw is not None:
-                try:
-                    er = float(ex_raw)
-                    ex_ms = int(er) if er > 1e12 else int(er * 1000)
-                except (TypeError, ValueError):
-                    ex_ms = None
+            ex = (exchanges_by_id or {}).get(rid)
+            ex_ms = _order_exchange_timestamp_ms(o)
             side_v = str(o.get("side") or side_hint or "")
+            sym_v = str(o.get("symbol") or sym_hint)
             _append_account_log_row(
                 ts_ms=ts_ms,
                 source="webhook",
@@ -1216,10 +1631,11 @@ def _record_account_rows_from_webhook(
                 account_id=rid,
                 remark=remark,
                 ok=True,
-                symbol=o.get("symbol") or sym_hint,
+                symbol=sym_v,
                 side=side_v,
                 reduce_only=ro,
-                action=_service_action_label(ro, side_v),
+                action=_service_action_label(ro, side_v, is_reversal=is_rev),
+                is_reversal=is_rev,
                 quote_usdt=fq_f,
                 order_id=str(o.get("id") or ""),
                 error=None,
@@ -1228,7 +1644,7 @@ def _record_account_rows_from_webhook(
                 execute_trade_ms=execute_trade_ms,
                 total_trade_ms=total_trade_ms,
                 server_latency_ms=total_trade_ms,
-                **_order_summary_for_log(o),
+                **_order_summary_for_log(o, exchange=ex, symbol=sym_v),
             )
         else:
             _append_account_log_row(
@@ -1241,7 +1657,10 @@ def _record_account_rows_from_webhook(
                 symbol=sym_hint,
                 side=side_hint,
                 reduce_only=ro,
-                action=_service_action_label(ro, str(side_hint or "")),
+                action=_service_action_label(
+                    ro, str(side_hint or ""), is_reversal=is_rev
+                ),
+                is_reversal=is_rev,
                 quote_usdt=fq_f,
                 order_id=None,
                 error=str(r.get("error") or ""),
@@ -1251,6 +1670,48 @@ def _record_account_rows_from_webhook(
                 total_trade_ms=total_trade_ms,
                 server_latency_ms=total_trade_ms,
             )
+
+
+def _record_trailing_close_log(
+    account: dict[str, Any],
+    exchange,
+    order: dict[str, Any],
+    *,
+    symbol: str,
+    side: str,
+    current_tier: str | None = None,
+) -> None:
+    """移动止盈程序平仓成功后写入 execution_log。"""
+    aid = str(account.get("id") or "")
+    remark = str(account.get("remark") or "")
+    sym = str(order.get("symbol") or symbol)
+    merged = _merge_order_with_fetch(exchange, order)
+    side_v = str(merged.get("side") or side)
+    tier = (current_tier or "").strip()
+    action = f"移动止盈平仓({tier})" if tier and tier != "无" else "移动止盈平仓"
+    ex_ms = _order_exchange_timestamp_ms(merged)
+    _append_account_log_row(
+        ts_ms=int(time.time() * 1000),
+        source="trailing_stop",
+        market=BINANCE_DEFAULT_TYPE,
+        account_id=aid,
+        remark=remark,
+        ok=True,
+        symbol=sym,
+        side=side_v,
+        reduce_only=True,
+        action=action,
+        quote_usdt=None,
+        order_id=str(merged.get("id") or ""),
+        error=None,
+        exchange_timestamp_ms=ex_ms,
+        receive_signal_ms=None,
+        execute_trade_ms=None,
+        total_trade_ms=None,
+        server_latency_ms=None,
+        trailing_tier=tier or None,
+        **_order_summary_for_log(merged, exchange=exchange, symbol=sym),
+    )
 
 
 def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
@@ -1501,12 +1962,13 @@ def build_order_payload_for_account(
     多账户下单支持两种模式：
     1) template_or_fixed：优先按模板本金比例把 TV contracts 换算到各账户；
        若条件不满足则回退账户 fixed_quote_usdt。
-    2) follow_tv：优先直接跟随 TradingView 载荷中的 amount / quote_amount / contracts；
-       若 TV 未提供有效下单量则回退账户 fixed_quote_usdt。
+    2) follow_tv：跟随 TV 数量字段。OKX 优先 contracts（张）；币安等优先 amount（标的币），
+       其次 contracts（TV 字段名虽叫 contracts，币安上数值同为标的币数量）。
     若请求体含有效 quote_amount（含控制台「模拟 Webhook」），在两种模式下均优先使用该 USDT 名义；
     quote_amount 必须为「打算花多少 USDT」的数字，勿把张数/标的币数量写入该字段（否则会被当作 USDT）。
     """
     p = dict(base)
+    use_lots = _account_uses_contract_lots(account)
     settings = load_bot_settings()
     sizing_mode = str(
         settings.get("webhook_sizing_mode") or "template_or_fixed"
@@ -1528,37 +1990,59 @@ def build_order_payload_for_account(
 
     tv_contracts = _payload_contracts_amount(base)
     tv_amount_raw = base.get("amount")
+    tv_amount: float | None = None
+    if tv_amount_raw is not None:
+        try:
+            tv_amount = float(str(tv_amount_raw).replace(",", "").strip())
+        except (TypeError, ValueError):
+            tv_amount = None
+        if tv_amount is not None and tv_amount <= 0:
+            tv_amount = None
 
     if sizing_mode == "follow_tv":
-        if tv_amount_raw is not None:
-            try:
-                tv_amount = float(tv_amount_raw)
-            except (TypeError, ValueError):
-                tv_amount = None
-            if tv_amount is not None and tv_amount > 0:
+        if use_lots:
+            # OKX：contracts（张）优先于 amount（标的币）
+            if tv_contracts is not None and tv_contracts > 0:
+                p["amount"] = tv_contracts
+                p.pop("quote_amount", None)
+                p["_sizing_mode"] = "follow_tv_contracts"
+                p["_tv_contracts_raw"] = tv_contracts
+                return p
+            if tv_amount is not None:
                 p["amount"] = tv_amount
                 p.pop("quote_amount", None)
                 p["_sizing_mode"] = "follow_tv_amount"
                 return p
-        if tv_contracts is not None and tv_contracts > 0:
-            p["amount"] = tv_contracts
-            p.pop("quote_amount", None)
-            p["_sizing_mode"] = "follow_tv_contracts"
-            p["_tv_contracts_raw"] = tv_contracts
-            return p
+        else:
+            # 币安 / Hyperliquid：标的币数量；amount 优先，contracts 数值同语义
+            if tv_amount is not None:
+                p["amount"] = tv_amount
+                p.pop("quote_amount", None)
+                p["_sizing_mode"] = "follow_tv_amount"
+                return p
+            if tv_contracts is not None and tv_contracts > 0:
+                p["amount"] = tv_contracts
+                p.pop("quote_amount", None)
+                p["_sizing_mode"] = "follow_tv_amount"
+                p["_tv_qty_from_contracts_field"] = tv_contracts
+                return p
 
     tpl_base = float(settings.get("template_base_capital_usdt") or 0)
     acc_cap = float(account.get("template_capital_usdt") or 0)
-    if tpl_base > 0 and tv_contracts is not None and acc_cap > 0:
+    tv_tpl_qty = tv_contracts if tv_contracts is not None else tv_amount
+    if tpl_base > 0 and tv_tpl_qty is not None and acc_cap > 0:
         scale = acc_cap / tpl_base
-        amt = tv_contracts * scale
+        amt = tv_tpl_qty * scale
         if amt <= 0:
             raise ValueError(f"账户「{account.get('remark')}」模板换算后数量无效")
         p["amount"] = amt
         p.pop("quote_amount", None)
-        p["_sizing_mode"] = "template_contracts"
+        if use_lots and tv_contracts is not None:
+            p["_sizing_mode"] = "template_contracts"
+            p["_template_contracts_raw"] = tv_contracts
+        else:
+            p["_sizing_mode"] = "template_amount"
         p["_template_scale"] = scale
-        p["_template_contracts_raw"] = tv_contracts
         p["_template_base_capital_usdt"] = tpl_base
         return p
 
@@ -1610,6 +2094,15 @@ def webhook_auth_or_error():
     if q and hmac.compare_digest(q, WEBHOOK_SECRET):
         return None
     return jsonify({"ok": False, "error": "Webhook 密钥错误或缺失"}), 401
+
+
+def _public_webhook_url(*, include_secret: bool) -> str:
+    """基于当前请求的 host 生成 /webhook；include_secret 时附带 ?secret=TV_WEBHOOK_SECRET。"""
+    root = (request.host_url or "").rstrip("/")
+    base = f"{root}/webhook"
+    if include_secret and WEBHOOK_SECRET:
+        return f"{base}?{urlencode({'secret': WEBHOOK_SECRET})}"
+    return base
 
 
 def _dashboard_secret_expected() -> str:
@@ -1735,6 +2228,18 @@ def _exchange_id(exchange) -> str:
 
 def _is_binance_exchange(exchange) -> bool:
     return _exchange_id(exchange) == "binance"
+
+
+def _exchange_uses_contract_lots(exchange) -> bool:
+    """OKX USDT 线性永续：TV/持仓 quantity 为「张」；币安等为标的币数量。"""
+    return _exchange_id(exchange) == "okx" and BINANCE_DEFAULT_TYPE == "future"
+
+
+def _account_uses_contract_lots(account: dict[str, Any]) -> bool:
+    return (
+        str(account.get("exchange") or "binance").lower().strip() == "okx"
+        and BINANCE_DEFAULT_TYPE == "future"
+    )
 
 
 def _replace_quote(symbol: str, new_quote: str) -> str:
@@ -1903,20 +2408,24 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
     if action not in ("buy", "sell"):
         raise ValueError(f"action/side 必须是 buy 或 sell，当前: {action}")
 
-    reduce_only = _resolve_reduce_only(payload, action)
-    payload["_resolved_reduce_only"] = reduce_only
     quote_amount = payload.get("quote_amount")
     amount = payload.get("amount")
 
-    params: dict[str, Any] = {}
+    # OKX 合约：tdMode 须与账户一致；默认 cross，逐仓用户在 .env 设 OKX_TD_MODE=isolated
+    okx_params: dict[str, Any] = {}
+    if _exchange_id(exchange) == "okx" and BINANCE_DEFAULT_TYPE == "future":
+        okx_params["marginMode"] = OKX_TD_MODE
+
+    symbol = resolve_symbol(exchange, symbol)
+    reduce_only = _resolve_reduce_only(
+        payload, action, exchange=exchange, symbol=symbol
+    )
+    payload["_resolved_reduce_only"] = reduce_only
+
+    params: dict[str, Any] = dict(okx_params)
     if reduce_only:
         params["reduceOnly"] = True
 
-    # OKX 合约：tdMode 须与账户一致；默认 cross，逐仓用户在 .env 设 OKX_TD_MODE=isolated
-    if _exchange_id(exchange) == "okx" and BINANCE_DEFAULT_TYPE == "future":
-        params["marginMode"] = OKX_TD_MODE
-
-    symbol = resolve_symbol(exchange, symbol)
     market_price = _market_price_for_order(exchange, symbol)
 
     full_flat = _tv_payload_is_strategy_full_flat(payload, reduce_only)
@@ -1936,7 +2445,7 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                 symbol,
                 float(pos_abs),
                 payload,
-                from_position_contracts=True,
+                from_position_contracts=_exchange_uses_contract_lots(exchange),
             )
         elif amount is not None:
             cost = None
@@ -1954,6 +2463,31 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 cost = DEFAULT_QUOTE_AMOUNT
                 amt = None
+    elif bool(payload.get("_is_reversal")) and BINANCE_DEFAULT_TYPE == "future":
+        if amount is None:
+            raise ValueError("反手信号缺少有效 contracts/amount，无法计算平仓+开仓总数量")
+        target_qty = _reversal_target_order_qty(payload, float(amount))
+        total_qty = _reversal_total_order_qty(
+            exchange, symbol, action, target_qty
+        )
+        unit = "张" if _exchange_uses_contract_lots(exchange) else "标的币"
+        logger.info(
+            "[反手] %s %s 目标新仓=%s%s 合计下单≈%s%s（含平旧仓）",
+            symbol,
+            action,
+            target_qty,
+            unit,
+            total_qty,
+            unit,
+        )
+        cost = None
+        amt = _okx_linear_swap_amount_to_base(
+            exchange,
+            symbol,
+            total_qty,
+            payload,
+            from_position_contracts=_exchange_uses_contract_lots(exchange),
+        )
     else:
         if quote_amount is not None:
             cost = float(quote_amount)
@@ -2130,6 +2664,8 @@ def api_status():
             }
             for aid, t in _trailing_stop_tasks.items()
         ]
+    role = dashboard_auth_role()
+    webhook_url = _public_webhook_url(include_secret=(role == "admin"))
     return jsonify(
         {
             "ok": True,
@@ -2141,6 +2677,8 @@ def api_status():
             "accounts_count": len(accs),
             "accounts_path": str(_ACCOUNTS_PATH.resolve()),
             "webhook_secret_configured": bool(WEBHOOK_SECRET),
+            "webhook_url": webhook_url,
+            "webhook_url_has_secret": role == "admin" and bool(WEBHOOK_SECRET),
             "dashboard_secret_configured": bool(dash),
             "dashboard_uses_dedicated_env": bool(DASHBOARD_SECRET),
             "dashboard_viewer_secret_configured": bool(viewer),
@@ -2148,6 +2686,7 @@ def api_status():
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
             "template_base_capital_usdt": bs["template_base_capital_usdt"],
             "webhook_sizing_mode": bs["webhook_sizing_mode"],
+            "webhook_open_only": bs["webhook_open_only"],
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
             "stop_loss_enabled": bs["stop_loss_enabled"],
             "stop_loss_pct": bs["stop_loss_pct"],
@@ -2173,6 +2712,8 @@ def api_bot_settings_put():
         cur["webhook_sizing_mode"] = str(body.get("webhook_sizing_mode") or "").strip().lower()
     if "template_base_capital_usdt" in body and body.get("template_base_capital_usdt") is not None:
         cur["template_base_capital_usdt"] = float(body.get("template_base_capital_usdt"))
+    if "webhook_open_only" in body:
+        cur["webhook_open_only"] = bool(body.get("webhook_open_only"))
     if cur["stop_loss_pct"] <= 0 or cur["stop_loss_pct"] > 50:
         return jsonify({"ok": False, "error": "止损百分比须在 0～50 之间"}), 400
     if cur.get("webhook_sizing_mode") not in ("template_or_fixed", "follow_tv"):
@@ -2726,14 +3267,7 @@ def api_order():
                 manual_quote_usdt = _to_float(op.get("quote_amount"))
             elif op.get("_sizing_mode") == "fixed_quote":
                 manual_quote_usdt = _to_float(a.get("fixed_quote_usdt"))
-        ex_raw = order.get("timestamp") or order.get("lastUpdateTimestamp")
-        ex_ms = None
-        if ex_raw is not None:
-            try:
-                er = float(ex_raw)
-                ex_ms = int(er) if er > 1e12 else int(er * 1000)
-            except (TypeError, ValueError):
-                ex_ms = None
+        ex_ms = _order_exchange_timestamp_ms(order)
         side_v = str(order.get("side") or "")
         sl_order, sl_err = _maybe_place_stop_loss_after_market(ex, order, ro)
         cancel_res: dict[str, Any] = {}
@@ -2765,7 +3299,9 @@ def api_order():
             symbol=str(order.get("symbol") or ""),
             side=side_v,
             reduce_only=ro,
-            action=_service_action_label(ro, side_v),
+            action=_service_action_label(
+                ro, side_v, is_reversal=bool(payload.get("_is_reversal"))
+            ),
             quote_usdt=manual_quote_usdt,
             order_id=str(order.get("id") or ""),
             error=None,
@@ -2776,7 +3312,9 @@ def api_order():
             server_latency_ms=total_trade_ms,
             stop_loss_order_id=str(sl_order.get("id") or "") if sl_order else None,
             stop_loss_error=sl_err,
-            **_order_summary_for_log(order),
+            **_order_summary_for_log(
+                order, exchange=ex, symbol=str(order.get("symbol") or "")
+            ),
         )
         return jsonify(
             {
@@ -2875,6 +3413,29 @@ def api_signal_log_delete():
     return jsonify({"ok": True, "cleared": True})
 
 
+def _normalize_okx_log_row_for_display(
+    row: dict[str, Any],
+    exchange,
+) -> dict[str, Any]:
+    """历史 OKX 记录 order_filled 存的是「张」，展示/PnL 需换算为标的币。"""
+    if row.get("order_filled_is_base"):
+        return row
+    if exchange is None or _exchange_id(exchange) != "okx":
+        return row
+    filled = row.get("order_filled")
+    sym = row.get("symbol")
+    if filled is None or not sym:
+        return row
+    ct = _okx_contract_size(exchange, str(sym))
+    if not ct or ct <= 0:
+        return row
+    normalized = dict(row)
+    normalized["order_filled_contracts"] = filled
+    normalized["order_filled"] = float(filled) * ct
+    normalized["order_filled_is_base"] = True
+    return normalized
+
+
 @app.get("/api/account-log")
 def api_account_log():
     """按账户执行记录：Webhook/手动试单 每笔一条（持久化；需控制台密钥）。"""
@@ -2905,6 +3466,47 @@ def api_account_log():
         archived_count = len(archived)
         snapshot = snapshot + archived
         total_stored += archived_count
+
+    # 同一 order_id 去重（保留最新一条；snapshot 已为 newest-first）
+    seen_oids: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for e in snapshot:
+        oid = str(e.get("order_id") or "")
+        if oid and oid in seen_oids:
+            continue
+        if oid:
+            seen_oids.add(oid)
+        deduped.append(e)
+    snapshot = deduped
+
+    # 历史 OKX 记录 order_filled 曾为「张」，读取时归一化为标的币
+    account_ex_names = {
+        str(a.get("id") or ""): str(a.get("exchange") or "binance").lower()
+        for a in _load_accounts()
+        if a.get("id")
+    }
+    needs_okx_norm = any(
+        not e.get("order_filled_is_base")
+        and account_ex_names.get(str(e.get("account_id") or "")) == "okx"
+        for e in snapshot
+    )
+    exchange_by_id: dict[str, Any] = {}
+    if needs_okx_norm:
+        for a in _load_accounts():
+            aid = str(a.get("id") or "")
+            if not aid or account_ex_names.get(aid) != "okx":
+                continue
+            try:
+                ex = get_exchange_for_account(a, purpose="read")
+                ex.load_markets()
+                exchange_by_id[aid] = ex
+            except Exception as err:
+                logger.debug(
+                    "加载 OKX markets 用于历史记录归一化失败 account=%s: %s",
+                    aid,
+                    err,
+                )
+
     out: list[dict[str, Any]] = []
     for e in snapshot:
         if aid and str(e.get("account_id")) != aid:
@@ -2913,7 +3515,11 @@ def api_account_log():
             continue
         if symbol_q and not _symbol_matches_query(str(e.get("symbol") or ""), symbol_q):
             continue
-        out.append(e)
+        row = e
+        ex_acc = exchange_by_id.get(str(e.get("account_id") or ""))
+        if ex_acc is not None:
+            row = _normalize_okx_log_row_for_display(e, ex_acc)
+        out.append(row)
         if len(out) >= limit:
             break
     hint = "热日志保存在 data/execution_log.jsonl；超出上限会归档到 data/execution_log.archive.jsonl。时间 UTC。"
@@ -3021,6 +3627,21 @@ def _trailing_stop_thread_main(
             resolved_eat = "stop_market"
         params["exchange_algo_type"] = resolved_eat
 
+        def _on_trailing_close(data: dict[str, Any]) -> None:
+            try:
+                _record_trailing_close_log(
+                    account,
+                    ex,
+                    data["order"],
+                    symbol=str(data.get("symbol") or ""),
+                    side=str(data.get("side") or ""),
+                    current_tier=data.get("current_tier"),
+                )
+            except Exception as err:
+                logger.exception(
+                    "移动止盈[%s] 写入交易记录失败: %s", aid, err
+                )
+
         worker = TrailingStopWorker(
             ex,
             account_id=aid,
@@ -3049,6 +3670,7 @@ def _trailing_stop_thread_main(
             trailing_exec=str(params.get("trailing_exec") or "signal"),
             exchange_algo_type=resolved_eat,
             testnet=USE_TESTNET,
+            close_log_hook=_on_trailing_close,
         )
         worker.restore_existing_algos()
         _idle_sec = float(params.get("idle_no_position_sec", 10))
@@ -3519,6 +4141,15 @@ def _finalize_webhook_results_after_delay(
             row["post_process_error"] = str(e)
             finalized.append(row)
 
+    exchanges_by_id: dict[str, Any] = {}
+    for i, base in enumerate(finalized):
+        task = post_tasks[i] if i < len(post_tasks) else None
+        if not task or not task.get("exchange"):
+            continue
+        aid = str(base.get("account_id") or "")
+        if aid:
+            exchanges_by_id[aid] = task["exchange"]
+
     record_webhook_signal(
         t_recv,
         payload,
@@ -3527,6 +4158,7 @@ def _finalize_webhook_results_after_delay(
         execute_trade_ms=execute_trade_ms,
         total_trade_ms=total_trade_ms,
         completed_at=completed_at,
+        exchanges_by_id=exchanges_by_id,
     )
 
 
@@ -3572,19 +4204,29 @@ def webhook():
         or ""
     )
     action_wh = str(action_raw).lower().strip()
-    # 仅开仓模式：仅从消息体读取
-    if bool(payload.get("open_only")) and action_wh in ("buy", "sell"):
+    if _webhook_open_only_active(payload, bs_wh) and action_wh in ("buy", "sell"):
         try:
-            if _resolve_reduce_only(payload, action_wh):
+            skip, infer_src = _webhook_should_skip_open_only(
+                payload, action_wh, targets
+            )
+            if skip:
                 logger.info(
-                    "Webhook 已启用「仅开仓」：忽略本次减仓/平仓信号 action=%s",
+                    "Webhook 已启用「仅开仓」：忽略本次减仓/平仓信号 action=%s source=%s",
                     action_wh,
+                    infer_src,
+                )
+                _record_webhook_open_only_skip(
+                    t_recv,
+                    payload,
+                    action_wh,
+                    infer_source=infer_src,
                 )
                 return jsonify(
                     {
                         "ok": True,
                         "skipped": True,
                         "reason": "webhook_open_only",
+                        "infer_source": infer_src,
                         "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单（止盈请用移动止盈）",
                     }
                 )
@@ -3616,6 +4258,8 @@ def webhook():
             "remark": account.get("remark"),
             "ok": True,
             "order": order,
+            "_is_reversal": bool(op.get("_is_reversal")),
+            "_resolved_reduce_only": ro,
             "fixed_quote_usdt": account.get("fixed_quote_usdt"),
             "used_quote_usdt": op.get("quote_amount"),
             "sizing_mode": op.get("_sizing_mode"),

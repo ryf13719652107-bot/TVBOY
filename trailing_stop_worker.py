@@ -103,6 +103,7 @@ class TrailingStopWorker:
         trailing_exec: str = "signal",
         exchange_algo_type: str = "stop_market",
         testnet: bool = False,
+        close_log_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.exchange = exchange
         self.account_id = account_id
@@ -156,6 +157,7 @@ class TrailingStopWorker:
         self.feishu_webhook = (feishu_webhook or "").strip() or None
         self.blacklist = blacklist or set()
         self.status_hook = status_hook
+        self.close_log_hook = close_log_hook
 
         self.highest_profits: dict[str, float] = {}
         self.current_tiers: dict[str, str] = {}
@@ -1188,10 +1190,11 @@ class TrailingStopWorker:
         current_tier：当前档位（"低档保护止盈"/"第一档移动止盈"/"第二档移动止盈"/"第三档移动止盈"/"无"），
             用于在 limit_ioc 模式按档位选择限价滑点 bps；未传或 "无" 时回退到全局 limit_offset_bps。
         """
+        last_order: dict[str, Any] | None = None
         try:
             if self.close_mode == "market":
                 with self.trade_lock:
-                    self.exchange.create_order(
+                    last_order = self.exchange.create_order(
                         symbol,
                         "market",
                         side,
@@ -1242,7 +1245,7 @@ class TrailingStopWorker:
                     old_timeout = getattr(self.exchange, "timeout", 10000)
                     self.exchange.timeout = 4000
                     try:
-                        order = self.exchange.create_order(
+                        last_order = self.exchange.create_order(
                             symbol,
                             "limit",
                             side,
@@ -1252,7 +1255,7 @@ class TrailingStopWorker:
                         )
                     finally:
                         self.exchange.timeout = old_timeout
-                    filled = _fe_float(order.get("filled"), 0.0)
+                    filled = _fe_float(last_order.get("filled"), 0.0)
                     eps = max(1e-12, amt * 1.0e-8)
                     if filled <= 0 or filled + eps < amt:
                         remaining = amt - filled
@@ -1267,7 +1270,7 @@ class TrailingStopWorker:
                                 remaining,
                             )
                             try:
-                                self.exchange.create_order(
+                                last_order = self.exchange.create_order(
                                     symbol,
                                     "market",
                                     side,
@@ -1284,6 +1287,24 @@ class TrailingStopWorker:
                         else:
                             return False
                     mode_txt = f"限价IOC(锚≈{sig:.8g})"
+
+            if last_order and self.close_log_hook:
+                try:
+                    self.close_log_hook(
+                        {
+                            "order": last_order,
+                            "symbol": symbol,
+                            "side": side,
+                            "current_tier": current_tier,
+                        }
+                    )
+                except Exception as hook_err:
+                    logger.warning(
+                        "移动止盈[%s] 交易记录回调失败 %s: %s",
+                        self.account_id,
+                        symbol,
+                        hook_err,
+                    )
 
             logger.info(
                 "移动止盈[%s] 已平仓 %s 数量 %s side=%s 方式=%s",
