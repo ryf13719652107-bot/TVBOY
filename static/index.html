@@ -884,17 +884,28 @@
           </label>
         </div>
         <div class="field-stack" style="margin-top: 0.65rem;">
-          <span class="label-text" style="margin-bottom:0.3rem;display:block;">每周暂停日</span>
-          <div id="webhookPauseDays" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="0" onchange="saveBotSettings()" /> 一</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="1" onchange="saveBotSettings()" /> 二</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="2" onchange="saveBotSettings()" /> 三</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="3" onchange="saveBotSettings()" /> 四</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="4" onchange="saveBotSettings()" /> 五</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="5" onchange="saveBotSettings()" /> 六</label>
-            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="6" onchange="saveBotSettings()" /> 日</label>
+          <label class="sl-check label-with-tip" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;flex-wrap:wrap;">
+            <input type="checkbox" id="webhookPauseEnabled" onchange="togglePauseSchedule(); saveBotSettings();" />
+            <span class="label-text">暂停接收信号</span>
+            <span class="help-tip" tabindex="0" data-tip="勾选后，每周在设定的时间段内暂停接收 TV Webhook 信号。北京时间。">?</span>
+          </label>
+          <div id="pauseScheduleDetail" style="display:none;margin-top:0.5rem;">
+            <div style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
+              <span style="white-space:nowrap;">从</span>
+              <select id="pauseStartDay" onchange="updatePauseDesc(); saveBotSettings();">
+                <option value="0">周一</option><option value="1">周二</option><option value="2">周三</option>
+                <option value="3">周四</option><option value="4">周五</option><option value="5">周六</option><option value="6">周日</option>
+              </select>
+              <input type="time" id="pauseStartTime" onchange="updatePauseDesc(); saveBotSettings();" style="width:100px;" />
+              <span style="white-space:nowrap;">到</span>
+              <select id="pauseEndDay" onchange="updatePauseDesc(); saveBotSettings();">
+                <option value="0">周一</option><option value="1">周二</option><option value="2">周三</option>
+                <option value="3">周四</option><option value="4">周五</option><option value="5">周六</option><option value="6">周日</option>
+              </select>
+              <input type="time" id="pauseEndTime" onchange="updatePauseDesc(); saveBotSettings();" style="width:100px;" />
+            </div>
+            <p id="pauseScheduleDesc" style="margin-top:0.35rem;font-size:0.82rem;min-height:1.2em;"></p>
           </div>
-          <span class="help-tip" tabindex="0" data-tip="勾选的日子不会接收 TV 信号（Webhook 直接返回已跳过）。周一=0，周日=6。不勾选则每天接收。" style="margin-top:0.2rem;display:inline-block;">?</span>
         </div>
         <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
           <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
@@ -2284,13 +2295,21 @@
         if (openOnlyEl && typeof d.webhook_open_only === "boolean") {
           openOnlyEl.checked = d.webhook_open_only;
         }
-        // 暂停日
-        if (d.webhook_pause_days && Array.isArray(d.webhook_pause_days)) {
-          const checks = document.querySelectorAll("#webhookPauseDays input[type=checkbox]");
-          checks.forEach(cb => {
-            cb.checked = d.webhook_pause_days.includes(parseInt(cb.value));
-          });
+        // 暂停时段
+        const pauseEnabledEl = document.getElementById("webhookPauseEnabled");
+        if (pauseEnabledEl && typeof d.webhook_pause_enabled === "boolean") {
+          pauseEnabledEl.checked = d.webhook_pause_enabled;
         }
+        const psd = document.getElementById("pauseStartDay");
+        const pst = document.getElementById("pauseStartTime");
+        const ped = document.getElementById("pauseEndDay");
+        const pet = document.getElementById("pauseEndTime");
+        if (psd && d.webhook_pause_start_day !== undefined) psd.value = d.webhook_pause_start_day;
+        if (pst && d.webhook_pause_start_time) pst.value = d.webhook_pause_start_time;
+        if (ped && d.webhook_pause_end_day !== undefined) ped.value = d.webhook_pause_end_day;
+        if (pet && d.webhook_pause_end_time) pet.value = d.webhook_pause_end_time;
+        togglePauseSchedule();
+        updatePauseDesc();
         applyWebhookUrlFromStatus(d);
       } catch (e) {
         dashboardRole = null;
@@ -2305,15 +2324,22 @@
       if (!getSecret()) return;
       if (!ensureAdminAction()) return;
       try {
-        const pauseChecks = document.querySelectorAll("#webhookPauseDays input[type=checkbox]:checked");
-        const pauseDays = Array.from(pauseChecks).map(cb => parseInt(cb.value));
+        const body = {
+          webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
+          webhook_pause_enabled: !!document.getElementById("webhookPauseEnabled")?.checked,
+        };
+        const psd = document.getElementById("pauseStartDay");
+        const pst = document.getElementById("pauseStartTime");
+        const ped = document.getElementById("pauseEndDay");
+        const pet = document.getElementById("pauseEndTime");
+        if (psd) body.webhook_pause_start_day = parseInt(psd.value);
+        if (pst) body.webhook_pause_start_time = pst.value;
+        if (ped) body.webhook_pause_end_day = parseInt(ped.value);
+        if (pet) body.webhook_pause_end_time = pet.value;
         await fetch("/api/bot-settings", {
           method: "PUT",
           headers: authHeaders(),
-          body: JSON.stringify({
-            webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
-            webhook_pause_days: pauseDays,
-          }),
+          body: JSON.stringify(body),
         });
       } catch (e) {
         // 静默保存，忽略错误
@@ -2604,6 +2630,23 @@
     }
 
     document.getElementById("btnTvWizardGenerate")?.addEventListener("click", tvWizardGenerate);
+
+    function togglePauseSchedule() {
+      const el = document.getElementById("pauseScheduleDetail");
+      const enabled = document.getElementById("webhookPauseEnabled")?.checked || false;
+      if (el) el.style.display = enabled ? "" : "none";
+    }
+
+    const _PAUSE_DAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    function updatePauseDesc() {
+      const el = document.getElementById("pauseScheduleDesc");
+      if (!el) return;
+      const sd = parseInt(document.getElementById("pauseStartDay")?.value) || 0;
+      const st = document.getElementById("pauseStartTime")?.value || "00:00";
+      const ed = parseInt(document.getElementById("pauseEndDay")?.value) || 0;
+      const et = document.getElementById("pauseEndTime")?.value || "00:00";
+      el.textContent = `每周 ${_PAUSE_DAY_NAMES[sd]} ${st} → ${_PAUSE_DAY_NAMES[ed]} ${et} 暂停接收信号（北京时间）`;
+    }
     document.getElementById("btnTvWizardCopyOutput")?.addEventListener("click", async () => {
       const el = document.getElementById("tvWizardOutput");
       const b = document.getElementById("btnTvWizardCopyOutput");

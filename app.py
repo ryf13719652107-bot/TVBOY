@@ -424,8 +424,28 @@ _reload_persisted_logs()
 def _default_bot_settings() -> dict[str, Any]:
     return {
         "webhook_open_only": False,
-        "webhook_pause_days": [],  # 0=周一 … 6=周日，这些天不接 TV 信号
+        "webhook_pause_enabled": False,
+        "webhook_pause_start_day": 5,   # 0=周一 … 6=周日
+        "webhook_pause_start_time": "22:00",
+        "webhook_pause_end_day": 0,
+        "webhook_pause_end_time": "08:00",
     }
+
+
+def _normalize_pause_field(val: Any, fallback: Any) -> Any:
+    """安全读取暂停配置字段，类型不对返回默认值。"""
+    if val is None:
+        return fallback
+    try:
+        if isinstance(fallback, bool):
+            return bool(val)
+        if isinstance(fallback, int):
+            return int(val)
+        if isinstance(fallback, str):
+            return str(val)
+    except (ValueError, TypeError):
+        return fallback
+    return fallback
 
 
 def load_bot_settings() -> dict[str, Any]:
@@ -439,10 +459,19 @@ def load_bot_settings() -> dict[str, Any]:
         if isinstance(data, dict):
             if "webhook_open_only" in data:
                 base["webhook_open_only"] = bool(data["webhook_open_only"])
-            if "webhook_pause_days" in data:
-                raw_days = data.get("webhook_pause_days")
-                if isinstance(raw_days, list):
-                    base["webhook_pause_days"] = [int(d) for d in raw_days if isinstance(d, (int, float)) and 0 <= d <= 6]
+            # 新版时间段配置
+            for key in ("webhook_pause_enabled", "webhook_pause_start_day",
+                        "webhook_pause_start_time", "webhook_pause_end_day",
+                        "webhook_pause_end_time"):
+                if key in data:
+                    base[key] = _normalize_pause_field(data[key], base[key])
+            # 兼容旧版 webhook_pause_days（迁移到新版）
+            if "webhook_pause_days" in data and isinstance(data.get("webhook_pause_days"), list):
+                old_days = data["webhook_pause_days"]
+                if old_days and not data.get("webhook_pause_enabled"):
+                    base["webhook_pause_enabled"] = True
+                    base["webhook_pause_start_day"] = min(old_days)
+                    base["webhook_pause_end_day"] = max(old_days)
     except Exception as e:
         logger.warning("读取 bot_settings 失败: %s", e)
     return base
@@ -451,10 +480,15 @@ def load_bot_settings() -> dict[str, Any]:
 def save_bot_settings(settings: dict[str, Any]) -> None:
     _BOT_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _BOT_SETTINGS_PATH.with_suffix(".tmp")
+    base = _default_bot_settings()
     payload = {
-        "version": 1,
-        "webhook_open_only": bool(settings.get("webhook_open_only")),
-        "webhook_pause_days": list(settings.get("webhook_pause_days") or []),
+        "version": 2,
+        "webhook_open_only": bool(settings.get("webhook_open_only", base["webhook_open_only"])),
+        "webhook_pause_enabled": bool(settings.get("webhook_pause_enabled", base["webhook_pause_enabled"])),
+        "webhook_pause_start_day": int(settings.get("webhook_pause_start_day", base["webhook_pause_start_day"])),
+        "webhook_pause_start_time": str(settings.get("webhook_pause_start_time", base["webhook_pause_start_time"])),
+        "webhook_pause_end_day": int(settings.get("webhook_pause_end_day", base["webhook_pause_end_day"])),
+        "webhook_pause_end_time": str(settings.get("webhook_pause_end_time", base["webhook_pause_end_time"])),
     }
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -2292,7 +2326,11 @@ def api_status():
             "auth_role": dashboard_auth_role(),
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
             "webhook_open_only": bs["webhook_open_only"],
-            "webhook_pause_days": bs.get("webhook_pause_days") or [],
+            "webhook_pause_enabled": bs.get("webhook_pause_enabled", False),
+            "webhook_pause_start_day": bs.get("webhook_pause_start_day", 5),
+            "webhook_pause_start_time": bs.get("webhook_pause_start_time", "22:00"),
+            "webhook_pause_end_day": bs.get("webhook_pause_end_day", 0),
+            "webhook_pause_end_time": bs.get("webhook_pause_end_time", "08:00"),
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
             "hint": "Webhook 下单需 TV 消息提供有效的 quote_amount（USDT）。",
         }
@@ -2309,10 +2347,12 @@ def api_bot_settings_put():
     cur = load_bot_settings()
     if "webhook_open_only" in body:
         cur["webhook_open_only"] = bool(body.get("webhook_open_only"))
-    if "webhook_pause_days" in body:
-        raw = body.get("webhook_pause_days")
-        if isinstance(raw, list):
-            cur["webhook_pause_days"] = [int(d) for d in raw if isinstance(d, (int, float)) and 0 <= d <= 6]
+    if "webhook_pause_enabled" in body:
+        cur["webhook_pause_enabled"] = bool(body["webhook_pause_enabled"])
+    for key in ("webhook_pause_start_day", "webhook_pause_start_time",
+                "webhook_pause_end_day", "webhook_pause_end_time"):
+        if key in body:
+            cur[key] = _normalize_pause_field(body[key], cur[key])
     save_bot_settings(cur)
     return jsonify({"ok": True, **cur})
 
@@ -3299,18 +3339,35 @@ def webhook():
         )
     bs_wh = load_bot_settings()
 
-    # ── 每周暂停日检查（北京时间）──
-    pause_days = bs_wh.get("webhook_pause_days") or []
-    if pause_days:
+    # ── 每周暂停时段检查（北京时间）──
+    if bs_wh.get("webhook_pause_enabled"):
         from datetime import datetime, timezone, timedelta
 
         _CST = timezone(timedelta(hours=8))
-        today_weekday = datetime.now(_CST).weekday()  # 0=周一 … 6=周日
-        if today_weekday in pause_days:
+        now = datetime.now(_CST)
+        now_minutes = now.weekday() * 1440 + now.hour * 60 + now.minute
+
+        start_day = int(bs_wh.get("webhook_pause_start_day", 5))
+        start_h, start_m = map(int, str(bs_wh.get("webhook_pause_start_time", "22:00")).split(":"))
+        start_minutes = start_day * 1440 + start_h * 60 + start_m
+
+        end_day = int(bs_wh.get("webhook_pause_end_day", 0))
+        end_h, end_m = map(int, str(bs_wh.get("webhook_pause_end_time", "08:00")).split(":"))
+        end_minutes = end_day * 1440 + end_h * 60 + end_m
+
+        # 判断是否在暂停时段内（支持跨周，如周五22:00 → 周一08:00）
+        if start_minutes < end_minutes:
+            in_pause = start_minutes <= now_minutes < end_minutes
+        else:
+            in_pause = now_minutes >= start_minutes or now_minutes < end_minutes
+
+        if in_pause:
             _DAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-            day_name = _DAY_NAMES[today_weekday] if 0 <= today_weekday <= 6 else str(today_weekday)
-            logger.info("Webhook 暂停日 (%s 北京时间)，跳过信号", day_name)
-            return jsonify({"ok": True, "skipped": True, "reason": "pause_day", "day": day_name})
+            sd_name = _DAY_NAMES[start_day]
+            ed_name = _DAY_NAMES[end_day]
+            desc = f"{sd_name} {bs_wh.get('webhook_pause_start_time')} → {ed_name} {bs_wh.get('webhook_pause_end_time')}"
+            logger.info("Webhook 暂停时段 (%s 北京时间)，跳过信号", desc)
+            return jsonify({"ok": True, "skipped": True, "reason": "pause_schedule", "schedule": desc})
 
     action_raw = (
         payload.get("action")
