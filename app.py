@@ -27,8 +27,6 @@ from typing import Any
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 
-from trailing_stop_worker import TrailingStopWorker
-
 # 只从「python量化/.env」加载，避免无路径 load_dotenv() 扫到其它目录 .env 把密钥覆盖成空
 _env = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_env, override=True)
@@ -58,15 +56,14 @@ _SIGNAL_ARCHIVE_JSONL_PATH = (
 )
 _BOT_SETTINGS_PATH = Path(__file__).resolve().parent / "data" / "bot_settings.json"
 
+from tp_sl_monitor import get_monitor, load_tp_sl_config, save_tp_sl_config  # noqa: E402
+
 _exchange_cache: dict[str, Any] = {}
 _exchange_cache_lock = threading.Lock()
 _account_trade_locks: dict[str, threading.Lock] = {}
 _account_trade_locks_lock = threading.Lock()
 _webhook_finalize_executor: ThreadPoolExecutor | None = None
 _webhook_finalize_executor_lock = threading.Lock()
-_trailing_stop_tasks_lock = threading.Lock()
-_trailing_stop_tasks: dict[str, dict[str, Any]] = {}
-
 
 def _load_runtime_binance() -> tuple[str, str]:
     try:
@@ -101,7 +98,6 @@ def _migrate_legacy_if_needed() -> None:
     k, s = _load_runtime_binance()
     if not k or not s:
         return
-    fq = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
     acc = {
         "id": str(uuid.uuid4()),
         "remark": "默认账户",
@@ -109,10 +105,7 @@ def _migrate_legacy_if_needed() -> None:
         "api_key": k,
         "secret": s,
         "password": "",
-        "template_capital_usdt": 0,
-        "fixed_quote_usdt": fq,
         "enabled": True,
-        "webhook_enabled": True,
     }
     _save_accounts_file([acc])
     logger.info("已从 binance_credentials.json 迁移到 accounts.json（1 个账户）")
@@ -204,8 +197,6 @@ DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
 BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
 # 默认每笔用多少 USDT（可被请求体 quote_amount 覆盖）
 DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
-# 模板本金（USDT）：>0 时，若 TV 载荷含 contracts，则按比例换算各账户下单数量
-TEMPLATE_BASE_CAPITAL_USDT = float(os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0"))
 # 启动时预加载交易所 markets（减少重启后首单 load_markets 冷启动延迟）
 PRELOAD_MARKETS_ON_STARTUP = (
     os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
@@ -222,7 +213,7 @@ def _load_okx_td_mode() -> str:
 
 
 OKX_TD_MODE = _load_okx_td_mode()
-# Webhook 下单后非关键后处理延迟秒数（止损/撤单/日志落盘）
+# Webhook 下单后非关键后处理延迟秒数（日志落盘等）
 WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
 # Webhook 多账户并发下单线程上限（默认 8）
 WEBHOOK_TRADE_MAX_WORKERS = _env_int("WEBHOOK_TRADE_MAX_WORKERS", 8)
@@ -432,15 +423,6 @@ _reload_persisted_logs()
 
 def _default_bot_settings() -> dict[str, Any]:
     return {
-        "stop_loss_enabled": os.getenv("STOP_LOSS_ENABLED", "").lower() == "true",
-        "stop_loss_pct": float(os.getenv("STOP_LOSS_PCT", "3.33")),
-        "webhook_sizing_mode": (
-            os.getenv("WEBHOOK_SIZING_MODE", "template_or_fixed").strip().lower()
-            or "template_or_fixed"
-        ),
-        "template_base_capital_usdt": float(
-            os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0")
-        ),
         "webhook_open_only": False,
     }
 
@@ -454,48 +436,18 @@ def load_bot_settings() -> dict[str, Any]:
         with open(_BOT_SETTINGS_PATH, encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            if "stop_loss_enabled" in data:
-                base["stop_loss_enabled"] = bool(data["stop_loss_enabled"])
-            if "stop_loss_pct" in data:
-                base["stop_loss_pct"] = float(data["stop_loss_pct"])
-            if "webhook_sizing_mode" in data:
-                mode = str(data["webhook_sizing_mode"] or "").strip().lower()
-                if mode in ("template_or_fixed", "follow_tv"):
-                    base["webhook_sizing_mode"] = mode
-            if "template_base_capital_usdt" in data:
-                base["template_base_capital_usdt"] = float(
-                    data["template_base_capital_usdt"]
-                )
             if "webhook_open_only" in data:
                 base["webhook_open_only"] = bool(data["webhook_open_only"])
     except Exception as e:
         logger.warning("读取 bot_settings 失败: %s", e)
-    if base["template_base_capital_usdt"] < 0:
-        base["template_base_capital_usdt"] = 0.0
-    if base["webhook_sizing_mode"] not in ("template_or_fixed", "follow_tv"):
-        base["webhook_sizing_mode"] = "template_or_fixed"
     return base
 
 
 def save_bot_settings(settings: dict[str, Any]) -> None:
     _BOT_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _BOT_SETTINGS_PATH.with_suffix(".tmp")
-    webhook_sizing_mode = str(
-        settings.get("webhook_sizing_mode", "template_or_fixed") or "template_or_fixed"
-    ).strip().lower()
-    if webhook_sizing_mode not in ("template_or_fixed", "follow_tv"):
-        webhook_sizing_mode = "template_or_fixed"
-    template_base_capital_usdt = float(
-        settings.get("template_base_capital_usdt", TEMPLATE_BASE_CAPITAL_USDT)
-    )
-    if template_base_capital_usdt < 0:
-        template_base_capital_usdt = 0.0
     payload = {
         "version": 1,
-        "stop_loss_enabled": bool(settings.get("stop_loss_enabled")),
-        "stop_loss_pct": float(settings.get("stop_loss_pct", 3.33)),
-        "webhook_sizing_mode": webhook_sizing_mode,
-        "template_base_capital_usdt": template_base_capital_usdt,
         "webhook_open_only": bool(settings.get("webhook_open_only")),
     }
     with open(tmp, "w", encoding="utf-8") as f:
@@ -503,166 +455,11 @@ def save_bot_settings(settings: dict[str, Any]) -> None:
     tmp.replace(_BOT_SETTINGS_PATH)
 
 
-def _binance_futures_algo_order(exchange, body: dict[str, Any]) -> dict[str, Any]:
-    """
-    币安 USDⓈ-M 条件单须走 POST /fapi/v1/algoOrder（约 2025-12 起旧 /fapi/v1/order 对 STOP* 返回 -4120）。
-    ccxt 可能尚未封装，使用 request('algoOrder', 'fapiPrivate', 'POST', body)。
-    """
-    return exchange.request("algoOrder", "fapiPrivate", "POST", body)
-
-
-def _algo_response_as_order_dict(raw: dict[str, Any]) -> dict[str, Any]:
-    """统一成带 id 的 dict，便于日志/返回。"""
-    aid = raw.get("algoId") or raw.get("clientAlgoId")
-    return {
-        "id": str(aid) if aid is not None else "",
-        "info": raw,
-        "algoOrder": True,
-    }
-
-
-def place_stop_loss_limit_order(
-    exchange,
-    unified_symbol: str,
-    market_order: dict[str, Any],
-    stop_loss_pct: float,
-) -> dict[str, Any] | None:
-    """
-    市价开仓/加仓后挂止损：优先 STOP（限价触发），失败则 STOP_MARKET。
-    仅用于合约：多头下方止损、空头上方止损。
-    使用 Algo Order API（CONDITIONAL），避免 -4120。
-    """
-    filled = float(market_order.get("filled") or 0)
-    if filled <= 0:
-        amt = market_order.get("amount")
-        if amt is not None:
-            try:
-                filled = float(amt)
-            except (TypeError, ValueError):
-                filled = 0.0
-    if filled <= 0:
-        logger.warning("止损跳过：市价单无成交数量")
-        return None
-
-    avg = float(market_order.get("average") or market_order.get("price") or 0)
-    if avg <= 0:
-        try:
-            t = exchange.fetch_ticker(unified_symbol)
-            avg = float(t.get("last") or t.get("close") or 0)
-        except Exception as e:
-            logger.warning("止损跳过：无法获取成交价 %s", e)
-            return None
-    if avg <= 0:
-        return None
-
-    side = str(market_order.get("side") or "").lower()
-    if side not in ("buy", "sell"):
-        return None
-
-    pct_f = float(stop_loss_pct) / 100.0
-    if side == "buy":
-        close_side = "SELL"
-        stop_price = avg * (1 - pct_f)
-    else:
-        close_side = "BUY"
-        stop_price = avg * (1 + pct_f)
-
-    stop_price = float(exchange.price_to_precision(unified_symbol, stop_price))
-    limit_price = stop_price
-    exchange.load_markets()
-    market = exchange.market(unified_symbol)
-    symbol_id = str(market.get("id") or "")
-    if not symbol_id:
-        logger.warning("止损跳过：无法解析交易对 id")
-        return None
-
-    qty_prec = exchange.amount_to_precision(unified_symbol, filled)
-    qty_str = str(qty_prec).strip()
-    try:
-        qf = float(qty_str)
-    except (TypeError, ValueError):
-        qf = 0.0
-    if qf <= 0:
-        return None
-
-    tp_str = str(exchange.price_to_precision(unified_symbol, stop_price))
-    lp_str = str(exchange.price_to_precision(unified_symbol, limit_price))
-
-    # 文档：reduceOnly 为字符串 "true"/"false"
-    base: dict[str, Any] = {
-        "algoType": "CONDITIONAL",
-        "symbol": symbol_id,
-        "side": close_side,
-        "workingType": "MARK_PRICE",
-        "reduceOnly": "true",
-        "triggerPrice": tp_str,
-        "quantity": qty_str,
-    }
-
-    try:
-        raw = _binance_futures_algo_order(
-            exchange,
-            {
-                **base,
-                "type": "STOP",
-                "price": lp_str,
-                "timeInForce": "GTC",
-            },
-        )
-        return _algo_response_as_order_dict(raw if isinstance(raw, dict) else {"raw": raw})
-    except Exception as e:
-        logger.warning("Algo STOP 限价止损失败，改 STOP_MARKET: %s", e)
-    try:
-        raw = _binance_futures_algo_order(
-            exchange,
-            {
-                **base,
-                "type": "STOP_MARKET",
-            },
-        )
-        return _algo_response_as_order_dict(raw if isinstance(raw, dict) else {"raw": raw})
-    except Exception as e2:
-        logger.warning("Algo STOP_MARKET 止损失败: %s", e2)
-        raise
-
-
-def _maybe_place_stop_loss_after_market(
-    exchange,
-    market_order: dict[str, Any],
-    reduce_only: bool,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """市价成交后挂止损；当前仅 binance 合约支持。"""
-    if not _is_binance_exchange(exchange):
-        return None, None
-    bs = load_bot_settings()
-    if not bs.get("stop_loss_enabled"):
-        return None, None
-    if BINANCE_DEFAULT_TYPE != "future":
-        return None, None
-    if reduce_only:
-        return None, None
-    sym = market_order.get("symbol")
-    if not sym:
-        return None, "市价单缺少 symbol"
-    try:
-        sl = place_stop_loss_limit_order(
-            exchange,
-            str(sym),
-            market_order,
-            float(bs["stop_loss_pct"]),
-        )
-        return sl, None
-    except Exception as e:
-        logger.warning("止损挂单失败: %s", e)
-        return None, str(e)
-
-
 def _tv_payload_is_strategy_full_flat(
     payload: dict[str, Any], reduce_only: bool
 ) -> bool:
     """
     策略「全部平仓」（可选）：告警里含 market_position=flat 或 position_size=0。
-    未改 Pine、无上述字段时，请用 should_cancel_stop_loss_on_reduce 走交易所持仓判断。
     """
     if not reduce_only:
         return False
@@ -709,7 +506,7 @@ def _futures_net_position_abs(exchange, unified_symbol: str) -> float | None:
             except (TypeError, ValueError):
                 pass
     if matched:
-        # 有该合约仓位条目但解析不到数量：勿当作 0，避免误撤止损
+        # 有该合约仓位条目但解析不到数量：勿当作 0
         return None
     return 0.0
 
@@ -781,92 +578,6 @@ def _position_effectively_zero(
     except Exception:
         pass
     return pos_abs < 1e-9
-
-
-def should_cancel_stop_loss_on_reduce(
-    exchange, unified_symbol: str, payload: dict[str, Any], reduce_only: bool
-) -> bool:
-    """
-    仅减仓成交后是否视为「已全平」并撤止损：
-    1）告警里含 flat / position_size=0（可选）；
-    2）否则查询交易所：该合约净持仓≈0（无需改 Pine 策略）。
-    """
-    if not reduce_only or BINANCE_DEFAULT_TYPE != "future" or not unified_symbol:
-        return False
-    if _tv_payload_is_strategy_full_flat(payload, reduce_only):
-        return True
-    pos_abs = _futures_net_position_abs(exchange, unified_symbol)
-    if pos_abs is None:
-        return False
-    return _position_effectively_zero(exchange, unified_symbol, pos_abs)
-
-
-def _algo_row_is_stop_loss(row: dict[str, Any]) -> bool:
-    ot = str(row.get("orderType") or "").upper()
-    if ot not in ("STOP", "STOP_MARKET"):
-        return False
-    r = row.get("reduceOnly")
-    if r is True:
-        return True
-    if isinstance(r, str) and r.lower() == "true":
-        return True
-    return False
-
-
-def cancel_open_stop_loss_algo_orders(
-    exchange, unified_symbol: str
-) -> tuple[list[dict[str, Any]], str | None]:
-    """
-    取消该合约上未触发的 CONDITIONAL STOP / STOP_MARKET 且 reduceOnly 的挂单（机器人挂的止损）。
-    """
-    if BINANCE_DEFAULT_TYPE != "future" or not _is_binance_exchange(exchange):
-        return [], None
-    if not unified_symbol:
-        return [], "缺少 symbol"
-    try:
-        exchange.load_markets()
-        market = exchange.market(unified_symbol)
-        symbol_id = str(market.get("id") or "")
-    except Exception as e:
-        return [], str(e)
-    if not symbol_id:
-        return [], "无法解析交易对 id"
-    try:
-        raw = exchange.request(
-            "openAlgoOrders",
-            "fapiPrivate",
-            "GET",
-            {"symbol": symbol_id, "algoType": "CONDITIONAL"},
-        )
-    except Exception as e:
-        return [], str(e)
-    rows: list[dict[str, Any]]
-    if isinstance(raw, list):
-        rows = raw
-    elif isinstance(raw, dict) and isinstance(raw.get("orders"), list):
-        rows = raw["orders"]
-    else:
-        rows = []
-    cancelled: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict) or not _algo_row_is_stop_loss(row):
-            continue
-        aid = row.get("algoId")
-        if aid is None:
-            continue
-        try:
-            exchange.request(
-                "algoOrder",
-                "fapiPrivate",
-                "DELETE",
-                {"algoId": aid},
-            )
-            cancelled.append(
-                {"algoId": aid, "orderType": row.get("orderType")}
-            )
-        except Exception as e:
-            logger.warning("取消止损 algo %s 失败: %s", aid, e)
-    return cancelled, None
 
 
 def _normalize_tv_position_side(raw: Any) -> str | None:
@@ -1401,9 +1112,25 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
         return order
 
 
+def _get_min_contracts(exchange, mkt: dict | None) -> float:
+    """获取交易所最小合约张数。OKX 必须整数（≥1），Gate 支持小数张。"""
+    _raw = None
+    if isinstance(mkt, dict):
+        _raw = mkt.get("limits", {}).get("amount", {}).get("min")
+    if _raw is not None:
+        min_val = float(_raw)
+    else:
+        min_val = 1.0
+    if _exchange_id(exchange) == "okx":
+        # OKX 合约必须整张
+        return max(1.0, float(int(min_val)))
+    # Gate 支持小数张，直接使用市场报告的精度
+    return max(min_val, 0.0) if min_val > 0 else 1.0
+
+
 def _okx_contract_size(exchange, symbol: str) -> float | None:
-    """OKX USDT 线性永续每张合约对应的标的币数量（ctVal / contractSize）。"""
-    if _exchange_id(exchange) != "okx":
+    """OKX/Gate USDT 线性永续每张合约对应的标的币数量（ctVal / contractSize）。"""
+    if _exchange_id(exchange) not in ("okx", "gate"):
         return None
     mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
     if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
@@ -1614,7 +1341,7 @@ def _record_account_rows_from_webhook(
         rid = str(r.get("account_id") or "")
         remark = str(r.get("remark") or "")
         ts_ms = int(time.time() * 1000)
-        fq = r.get("used_quote_usdt", r.get("fixed_quote_usdt"))
+        fq = r.get("used_quote_usdt")
         fq_f = float(fq) if fq is not None else None
         is_rev = bool(r.get("_is_reversal"))
         ro = bool(r.get("_resolved_reduce_only", False))
@@ -1672,46 +1399,6 @@ def _record_account_rows_from_webhook(
             )
 
 
-def _record_trailing_close_log(
-    account: dict[str, Any],
-    exchange,
-    order: dict[str, Any],
-    *,
-    symbol: str,
-    side: str,
-    current_tier: str | None = None,
-) -> None:
-    """移动止盈程序平仓成功后写入 execution_log。"""
-    aid = str(account.get("id") or "")
-    remark = str(account.get("remark") or "")
-    sym = str(order.get("symbol") or symbol)
-    merged = _merge_order_with_fetch(exchange, order)
-    side_v = str(merged.get("side") or side)
-    tier = (current_tier or "").strip()
-    action = f"移动止盈平仓({tier})" if tier and tier != "无" else "移动止盈平仓"
-    ex_ms = _order_exchange_timestamp_ms(merged)
-    _append_account_log_row(
-        ts_ms=int(time.time() * 1000),
-        source="trailing_stop",
-        market=BINANCE_DEFAULT_TYPE,
-        account_id=aid,
-        remark=remark,
-        ok=True,
-        symbol=sym,
-        side=side_v,
-        reduce_only=True,
-        action=action,
-        quote_usdt=None,
-        order_id=str(merged.get("id") or ""),
-        error=None,
-        exchange_timestamp_ms=ex_ms,
-        receive_signal_ms=None,
-        execute_trade_ms=None,
-        total_trade_ms=None,
-        server_latency_ms=None,
-        trailing_tier=tier or None,
-        **_order_summary_for_log(merged, exchange=exchange, symbol=sym),
-    )
 
 
 def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
@@ -1727,7 +1414,7 @@ def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
 def refresh_env() -> None:
     """每次请求前从 .env 重新载入。"""
     global WEBHOOK_SECRET, DASHBOARD_SECRET, DASHBOARD_VIEWER_SECRET
-    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, TEMPLATE_BASE_CAPITAL_USDT
+    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT
     global USE_TESTNET, WEBHOOK_POST_DELAY_SEC, PRELOAD_MARKETS_ON_STARTUP
     global BALANCE_CACHE_TTL_SEC, WEBHOOK_TRADE_MAX_WORKERS, WEBHOOK_FINALIZE_MAX_WORKERS, WEBHOOK_LOG_PAYLOAD
     global LOG_HOT_MAX_EXECUTION, LOG_HOT_MAX_SIGNAL, DISPLAY_EST_FEE_RATE
@@ -1738,7 +1425,6 @@ def refresh_env() -> None:
     DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
     BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
     DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
-    TEMPLATE_BASE_CAPITAL_USDT = float(os.getenv("TEMPLATE_BASE_CAPITAL_USDT", "0"))
     USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
     WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
     WEBHOOK_TRADE_MAX_WORKERS = _env_int("WEBHOOK_TRADE_MAX_WORKERS", 8)
@@ -1882,26 +1568,31 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
                 "enableRateLimit": True,
             }
         )
+    elif ex_name == "gate":
+        default_type = "swap" if BINANCE_DEFAULT_TYPE == "future" else "spot"
+        ex = ccxt.gate(
+            {
+                "apiKey": api_key,
+                "secret": secret,
+                "options": {"defaultType": default_type},
+                "enableRateLimit": True,
+            }
+        )
+        ex.options["adjustForTimeDifference"] = True
     else:
-        raise ValueError("暂仅支持 binance / okx / hyperliquid")
+        raise ValueError("暂仅支持 binance / okx / hyperliquid / gate")
     with _exchange_cache_lock:
         _exchange_cache[cache_key] = ex
     return ex
 
 
 def webhook_accounts() -> list[dict[str, Any]]:
-    """参与 Webhook 跟单的账户：启用 + 勾选 webhook。"""
+    """参与 Webhook 下单的账户：启用 + 有密钥。"""
     out: list[dict[str, Any]] = []
     for a in _load_accounts():
         if not a.get("enabled", True):
             continue
-        if not a.get("webhook_enabled", True):
-            continue
         if not (a.get("api_key") or "").strip() or not (a.get("secret") or "").strip():
-            continue
-        fq = float(a.get("fixed_quote_usdt") or 0)
-        tpl_cap = float(a.get("template_capital_usdt") or 0)
-        if fq <= 0 and tpl_cap <= 0:
             continue
         out.append(a)
     return out
@@ -1930,7 +1621,7 @@ def _webhook_targets_scoped_by_payload(
                     "error": (
                         f"account_id={aid!r} 与当前任一 Webhook 账户不匹配。"
                         "请核对控制台「交易账户」中的账户 id（与告警模板助手里下拉框一致），"
-                        "并确认该账户已启用、勾选 Webhook、已保存 API 且设置了固定 USDT 或模板本金。"
+                        "并确认该账户已启用、已保存 API 密钥。"
                     ),
                     "signal_id": payload.get("signal_id"),
                 }
@@ -1940,41 +1631,15 @@ def _webhook_targets_scoped_by_payload(
     return matched, None
 
 
-def _payload_contracts_amount(payload: dict[str, Any]) -> float | None:
-    raw = payload.get("contracts")
-    if raw is None:
-        raw = payload.get("strategy.order.contracts")
-    if raw is None:
-        return None
-    try:
-        v = float(str(raw).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-    if v <= 0:
-        return None
-    return v
-
 
 def build_order_payload_for_account(
     base: dict[str, Any], account: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    多账户下单支持两种模式：
-    1) template_or_fixed：优先按模板本金比例把 TV contracts 换算到各账户；
-       若条件不满足则回退账户 fixed_quote_usdt。
-    2) follow_tv：跟随 TV 数量字段。OKX 优先 contracts（张）；币安等优先 amount（标的币），
-       其次 contracts（TV 字段名虽叫 contracts，币安上数值同为标的币数量）。
-    若请求体含有效 quote_amount（含控制台「模拟 Webhook」），在两种模式下均优先使用该 USDT 名义；
-    quote_amount 必须为「打算花多少 USDT」的数字，勿把张数/标的币数量写入该字段（否则会被当作 USDT）。
+    多账户下单：必须由 TV 消息体提供有效的 quote_amount（USDT 名义金额），
+    否则下单失败。
     """
     p = dict(base)
-    use_lots = _account_uses_contract_lots(account)
-    settings = load_bot_settings()
-    sizing_mode = str(
-        settings.get("webhook_sizing_mode") or "template_or_fixed"
-    ).strip().lower()
-    if sizing_mode not in ("template_or_fixed", "follow_tv"):
-        sizing_mode = "template_or_fixed"
 
     tv_quote_raw = base.get("quote_amount")
     if tv_quote_raw is not None:
@@ -1988,77 +1653,10 @@ def build_order_payload_for_account(
             p["_sizing_mode"] = "payload_quote_amount"
             return p
 
-    tv_contracts = _payload_contracts_amount(base)
-    tv_amount_raw = base.get("amount")
-    tv_amount: float | None = None
-    if tv_amount_raw is not None:
-        try:
-            tv_amount = float(str(tv_amount_raw).replace(",", "").strip())
-        except (TypeError, ValueError):
-            tv_amount = None
-        if tv_amount is not None and tv_amount <= 0:
-            tv_amount = None
-
-    if sizing_mode == "follow_tv":
-        if use_lots:
-            # OKX：contracts（张）优先于 amount（标的币）
-            if tv_contracts is not None and tv_contracts > 0:
-                p["amount"] = tv_contracts
-                p.pop("quote_amount", None)
-                p["_sizing_mode"] = "follow_tv_contracts"
-                p["_tv_contracts_raw"] = tv_contracts
-                return p
-            if tv_amount is not None:
-                p["amount"] = tv_amount
-                p.pop("quote_amount", None)
-                p["_sizing_mode"] = "follow_tv_amount"
-                return p
-        else:
-            # 币安 / Hyperliquid：标的币数量；amount 优先，contracts 数值同语义
-            if tv_amount is not None:
-                p["amount"] = tv_amount
-                p.pop("quote_amount", None)
-                p["_sizing_mode"] = "follow_tv_amount"
-                return p
-            if tv_contracts is not None and tv_contracts > 0:
-                p["amount"] = tv_contracts
-                p.pop("quote_amount", None)
-                p["_sizing_mode"] = "follow_tv_amount"
-                p["_tv_qty_from_contracts_field"] = tv_contracts
-                return p
-
-    tpl_base = float(settings.get("template_base_capital_usdt") or 0)
-    acc_cap = float(account.get("template_capital_usdt") or 0)
-    tv_tpl_qty = tv_contracts if tv_contracts is not None else tv_amount
-    if tpl_base > 0 and tv_tpl_qty is not None and acc_cap > 0:
-        scale = acc_cap / tpl_base
-        amt = tv_tpl_qty * scale
-        if amt <= 0:
-            raise ValueError(f"账户「{account.get('remark')}」模板换算后数量无效")
-        p["amount"] = amt
-        p.pop("quote_amount", None)
-        if use_lots and tv_contracts is not None:
-            p["_sizing_mode"] = "template_contracts"
-            p["_template_contracts_raw"] = tv_contracts
-        else:
-            p["_sizing_mode"] = "template_amount"
-        p["_template_scale"] = scale
-        p["_template_base_capital_usdt"] = tpl_base
-        return p
-
-    fq = float(account.get("fixed_quote_usdt") or 0)
-    if fq <= 0:
-        if sizing_mode == "follow_tv":
-            raise ValueError(
-                f"账户「{account.get('remark')}」未设置固定下单金额（USDT），且 TradingView 载荷缺少有效 amount / quote_amount / contracts"
-            )
-        raise ValueError(
-            f"账户「{account.get('remark')}」未设置固定下单金额（USDT），且模板比例条件未满足"
-        )
-    p["quote_amount"] = fq
-    p.pop("amount", None)
-    p["_sizing_mode"] = "fixed_quote"
-    return p
+    raise ValueError(
+        f"TV 消息未提供有效的 quote_amount，无法下单。"
+        f"请在 TradingView 告警中设置 quote_amount 字段（USDT 名义金额）。"
+    )
 
 
 def webhook_auth_or_error():
@@ -2231,15 +1829,9 @@ def _is_binance_exchange(exchange) -> bool:
 
 
 def _exchange_uses_contract_lots(exchange) -> bool:
-    """OKX USDT 线性永续：TV/持仓 quantity 为「张」；币安等为标的币数量。"""
-    return _exchange_id(exchange) == "okx" and BINANCE_DEFAULT_TYPE == "future"
+    """OKX/Gate USDT 线性永续：TV/持仓 quantity 为「张」；币安等为标的币数量。"""
+    return _exchange_id(exchange) in ("okx", "gate") and BINANCE_DEFAULT_TYPE == "future"
 
-
-def _account_uses_contract_lots(account: dict[str, Any]) -> bool:
-    return (
-        str(account.get("exchange") or "binance").lower().strip() == "okx"
-        and BINANCE_DEFAULT_TYPE == "future"
-    )
 
 
 def _replace_quote(symbol: str, new_quote: str) -> str:
@@ -2313,10 +1905,10 @@ def _okx_linear_swap_base_qty_to_contract_amount(
     exchange, symbol: str, base_coin_qty: float
 ) -> float:
     """
-    OKX USDT 线性永续：REST 的 sz / ccxt 传入的 amount 步长按「张」计，每张 = contractSize(ctVal) 个标的币。
+    OKX/Gate USDT 线性永续：REST 的 sz / ccxt 传入的 amount 步长按「张」计，每张 = contractSize(ctVal) 个标的币。
     将「希望成交的标的币数量」换成张数，避免把 87 ENA 误当成 87 张（每张 10 ENA → 870 ENA）。
     """
-    if _exchange_id(exchange) != "okx" or BINANCE_DEFAULT_TYPE != "future":
+    if _exchange_id(exchange) not in ("okx", "gate") or BINANCE_DEFAULT_TYPE != "future":
         return float(base_coin_qty)
     mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
     if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
@@ -2336,11 +1928,11 @@ def _okx_linear_swap_amount_to_base(
     from_position_contracts: bool,
 ) -> float:
     """
-    OKX USDT 线性永续：内部先统一到「标的币数量」；fetch_positions / TV 的 contracts 多为「张」，
+    OKX/Gate USDT 线性永续：内部先统一到「标的币数量」；fetch_positions / TV 的 contracts 多为「张」，
     仅在明确来自张数语义时乘以 contractSize(ctVal)。下单前再经 _okx_linear_swap_base_qty_to_contract_amount 换成张数。
     币安等所原样返回。
     """
-    if _exchange_id(exchange) != "okx" or BINANCE_DEFAULT_TYPE != "future":
+    if _exchange_id(exchange) not in ("okx", "gate") or BINANCE_DEFAULT_TYPE != "future":
         return amount_val
     mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
     if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
@@ -2349,10 +1941,7 @@ def _okx_linear_swap_amount_to_base(
     if ct <= 0:
         return amount_val
     mode = str(payload.get("_sizing_mode") or "")
-    if from_position_contracts or mode in (
-        "follow_tv_contracts",
-        "template_contracts",
-    ):
+    if from_position_contracts:
         return float(amount_val) * ct
     return float(amount_val)
 
@@ -2518,14 +2107,16 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             )
             mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
             ct = float(mkt.get("contractSize") or 0) if isinstance(mkt, dict) else 0.0
-            if _exchange_id(exchange) == "okx" and ct > 0:
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                ex_label = _exchange_id(exchange).upper()
                 logger.info(
-                    "[下单调试] 市价单: %s %s 标的≈%.8f %s（名义约 %s USDT）→ OKX 张数=%s（每张 %s %s）",
+                    "[下单调试] 市价单: %s %s 标的≈%.8f %s（名义约 %s USDT）→ %s 张数=%s（每张 %s %s）",
                     symbol,
                     action,
                     base_amt,
                     base_coin,
                     cost,
+                    ex_label,
                     order_amt,
                     ct,
                     base_coin,
@@ -2539,6 +2130,17 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     base_coin,
                     cost,
                 )
+            if _exchange_id(exchange) == "okx" and ct > 0:
+                min_contracts = _get_min_contracts(exchange, mkt)
+                if order_amt < min_contracts:
+                    min_base = float(min_contracts) * ct
+                    min_cost = min_base * (market_price or (float(cost) / base_amt if base_amt > 0 else 0))
+                    raise ValueError(
+                        f"下单张数 {order_amt} 低于最小 {min_contracts} 张。"
+                        f" 当前交易对 {symbol} 每张={ct} {base_coin}，"
+                        f"最小下单名义约 {min_cost:.2f} USDT。"
+                        f" 请将 quote_amount 调至至少 {min_cost:.2f}。"
+                    )
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
@@ -2549,13 +2151,15 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             )
             mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
             ct = float(mkt.get("contractSize") or 0) if isinstance(mkt, dict) else 0.0
-            if _exchange_id(exchange) == "okx" and ct > 0:
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                ex_label = _exchange_id(exchange).upper()
                 logger.info(
-                    "[下单调试] 市价单: %s %s 标的≈%s %s → OKX 张数=%s（每张 %s %s）",
+                    "[下单调试] 市价单: %s %s 标的≈%s %s → %s 张数=%s（每张 %s %s）",
                     symbol,
                     action,
                     amt,
                     base_coin,
+                    ex_label,
                     order_amt,
                     ct,
                     base_coin,
@@ -2568,10 +2172,20 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     amt,
                     base_coin,
                 )
+            if _exchange_id(exchange) == "okx" and ct > 0:
+                min_contracts = _get_min_contracts(exchange, mkt)
+                if order_amt < min_contracts:
+                    min_base = float(min_contracts) * ct
+                    raise ValueError(
+                        f"下单张数 {order_amt} 低于最小 {min_contracts} 张。"
+                        f" 当前交易对 {symbol} 每张={ct} {base_coin}，"
+                        f"最小下单名义约 {min_base} {base_coin}。"
+                        f" 请增加 amount 或改用 quote_amount。"
+                    )
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
-        
+
         logger.info("[下单调试] 订单创建成功: %s", order.get("id", "N/A"))
         return order
         
@@ -2632,10 +2246,7 @@ def _accounts_response_masked(accounts: list[dict[str, Any]]) -> list[dict[str, 
                 "api_key_preview": _mask_api_key((a.get("api_key") or "")),
                 "has_secret": bool((a.get("secret") or "").strip()),
                 "has_password": bool((a.get("password") or "").strip()),
-                "fixed_quote_usdt": a.get("fixed_quote_usdt"),
-                "template_capital_usdt": a.get("template_capital_usdt"),
                 "enabled": a.get("enabled", True),
-                "webhook_enabled": a.get("webhook_enabled", True),
             }
         )
     return out
@@ -2654,16 +2265,6 @@ def api_status():
         for x in accs
     )
     bs = load_bot_settings()
-    with _trailing_stop_tasks_lock:
-        trailing_snap = [
-            {
-                "account_id": aid,
-                "remark": (t or {}).get("remark"),
-                "exchange": (t or {}).get("exchange"),
-                "running": bool((t or {}).get("running")),
-            }
-            for aid, t in _trailing_stop_tasks.items()
-        ]
     role = dashboard_auth_role()
     webhook_url = _public_webhook_url(include_secret=(role == "admin"))
     return jsonify(
@@ -2684,44 +2285,98 @@ def api_status():
             "dashboard_viewer_secret_configured": bool(viewer),
             "auth_role": dashboard_auth_role(),
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
-            "template_base_capital_usdt": bs["template_base_capital_usdt"],
-            "webhook_sizing_mode": bs["webhook_sizing_mode"],
             "webhook_open_only": bs["webhook_open_only"],
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
-            "stop_loss_enabled": bs["stop_loss_enabled"],
-            "stop_loss_pct": bs["stop_loss_pct"],
-            "trailing_stop_tasks": trailing_snap,
-            "hint": "Webhook 下单支持两种模式：模板比例/固定USDT，或直接跟随 TradingView 的 amount/quote_amount/contracts。",
+            "hint": "Webhook 下单需 TV 消息提供有效的 quote_amount（USDT）。",
         }
     )
 
 
 @app.put("/api/bot-settings")
 def api_bot_settings_put():
-    """全局止损开关与百分比（需控制台密钥）；写入 data/bot_settings.json。"""
+    """全局设置（需控制台密钥）；写入 data/bot_settings.json。"""
     bad = dashboard_auth_response_if_invalid()
     if bad:
         return bad
     body = request.get_json(silent=True) or {}
     cur = load_bot_settings()
-    if "stop_loss_enabled" in body:
-        cur["stop_loss_enabled"] = bool(body.get("stop_loss_enabled"))
-    if "stop_loss_pct" in body and body.get("stop_loss_pct") is not None:
-        cur["stop_loss_pct"] = float(body.get("stop_loss_pct"))
-    if "webhook_sizing_mode" in body:
-        cur["webhook_sizing_mode"] = str(body.get("webhook_sizing_mode") or "").strip().lower()
-    if "template_base_capital_usdt" in body and body.get("template_base_capital_usdt") is not None:
-        cur["template_base_capital_usdt"] = float(body.get("template_base_capital_usdt"))
     if "webhook_open_only" in body:
         cur["webhook_open_only"] = bool(body.get("webhook_open_only"))
-    if cur["stop_loss_pct"] <= 0 or cur["stop_loss_pct"] > 50:
-        return jsonify({"ok": False, "error": "止损百分比须在 0～50 之间"}), 400
-    if cur.get("webhook_sizing_mode") not in ("template_or_fixed", "follow_tv"):
-        return jsonify({"ok": False, "error": "下单模式仅支持 template_or_fixed 或 follow_tv"}), 400
-    if float(cur.get("template_base_capital_usdt") or 0) < 0:
-        return jsonify({"ok": False, "error": "模板本金不能小于 0"}), 400
     save_bot_settings(cur)
     return jsonify({"ok": True, **cur})
+
+
+# ---------------------------------------------------------------------------
+# TP/SL 止盈止损监控  API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/tp-sl/config")
+def api_tp_sl_config_get():
+    """获取 TP/SL 配置（Viewer 可读，Admin 可写）。"""
+    bad = dashboard_auth_response_if_invalid(allow_viewer=True)
+    if bad:
+        return bad
+    return jsonify({"ok": True, **load_tp_sl_config()})
+
+
+@app.put("/api/tp-sl/config")
+def api_tp_sl_config_put():
+    """保存 TP/SL 配置（需 Admin）。"""
+    bad = dashboard_auth_response_if_invalid()
+    if bad:
+        return bad
+    body = request.get_json(silent=True) or {}
+    cur = load_tp_sl_config()
+    for key in (
+        "account_id", "symbol", "tp_points", "sl_points",
+        "breakeven_trigger_points", "breakeven_drawdown_points",
+        "use_limit_orders", "enabled",
+    ):
+        if key in body:
+            val = body[key]
+            if key in ("tp_points", "sl_points", "breakeven_trigger_points", "breakeven_drawdown_points"):
+                cur[key] = float(val) if val is not None else cur[key]
+            elif key in ("use_limit_orders", "enabled"):
+                cur[key] = bool(val)
+            else:
+                cur[key] = str(val).strip() if val is not None else cur[key]
+    save_tp_sl_config(cur)
+    return jsonify({"ok": True, **cur})
+
+
+@app.post("/api/tp-sl/start")
+def api_tp_sl_start():
+    """启动 TP/SL 监控（需 Admin）。"""
+    bad = dashboard_auth_response_if_invalid()
+    if bad:
+        return bad
+    m = get_monitor()
+    try:
+        m.start()
+        return jsonify({"ok": True, "status": m.status()})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.post("/api/tp-sl/stop")
+def api_tp_sl_stop():
+    """停止 TP/SL 监控（需 Admin）。"""
+    bad = dashboard_auth_response_if_invalid()
+    if bad:
+        return bad
+    m = get_monitor()
+    m.stop()
+    return jsonify({"ok": True, "status": m.status()})
+
+
+@app.get("/api/tp-sl/status")
+def api_tp_sl_status():
+    """获取 TP/SL 监控运行状态（Viewer 可读）。"""
+    bad = dashboard_auth_response_if_invalid(allow_viewer=True)
+    if bad:
+        return bad
+    m = get_monitor()
+    return jsonify({"ok": True, "status": m.status()})
 
 
 @app.get("/api/accounts")
@@ -2783,15 +2438,6 @@ def api_accounts_put():
                     "error": f"账户「{row.get('remark') or rid}」使用 OKX 时必须填写 Passphrase",
                 }
             ), 400
-        fq = float(row.get("fixed_quote_usdt") or 0)
-        tcap = float(row.get("template_capital_usdt") or 0)
-        if fq <= 0 and tcap <= 0:
-            return jsonify(
-                {
-                    "ok": False,
-                    "error": f"账户「{row.get('remark') or rid}」固定USDT或模板本金至少一项须大于 0",
-                }
-            ), 400
         merged.append(
             {
                 "id": rid,
@@ -2800,18 +2446,15 @@ def api_accounts_put():
                 "api_key": ak,
                 "secret": sk,
                 "password": pw,
-                "fixed_quote_usdt": fq,
-                "template_capital_usdt": tcap,
                 "enabled": bool(row.get("enabled", True)),
-                "webhook_enabled": bool(row.get("webhook_enabled", True)),
             }
         )
-        if merged[-1]["exchange"] not in ("binance", "okx", "hyperliquid"):
+        if merged[-1]["exchange"] not in ("binance", "okx", "hyperliquid", "gate"):
             return (
                 jsonify(
                     {
                         "ok": False,
-                        "error": f"账户「{row.get('remark') or rid}」交易所仅支持 binance、okx 或 hyperliquid",
+                        "error": f"账户「{row.get('remark') or rid}」交易所仅支持 binance、okx、hyperliquid、gate",
                     }
                 ),
                 400,
@@ -3043,7 +2686,7 @@ def api_balance():
                 usdt_future: dict[str, Any] = {}
                 usdt_spot: dict[str, Any] = {}
                 try:
-                    fut_type = "swap" if ex_id in ("hyperliquid", "okx") else "future"
+                    fut_type = "swap" if ex_id in ("hyperliquid", "okx", "gate") else "future"
                     if ex_id == "okx":
                         usdt_future = normalize_usdt_balance(
                             _okx_fetch_balance(ex, fut_type)
@@ -3089,8 +2732,6 @@ def api_balance():
                         "account_id": a["id"],
                         "remark": a.get("remark"),
                         "exchange": a.get("exchange") or "binance",
-                        "fixed_quote_usdt": a.get("fixed_quote_usdt"),
-                        "template_capital_usdt": a.get("template_capital_usdt"),
                         "usdt": primary,
                         "usdt_future": usdt_future,
                         "usdt_spot": usdt_spot,
@@ -3111,7 +2752,7 @@ def api_balance():
             "usdt": first.get("usdt") if first else None,
             "usdt_future": first.get("usdt_future") if first else None,
             "usdt_spot": first.get("usdt_spot") if first else None,
-            "hint": "多账户：默认展示第一个账户摘要；完整结果见 accounts 数组。Binance/OKX/Hyperliquid 的合约与现货资金池可能分开显示。",
+            "hint": "多账户：默认展示第一个账户摘要；完整结果见 accounts 数组。Binance/OKX/Hyperliquid/Gate 的合约与现货资金池可能分开显示。",
             "cache": {"hit": False, "ttl_sec": ttl, "key": cache_key},
         }
         if ttl > 0:
@@ -3149,7 +2790,7 @@ def api_positions():
             try:
                 ex = get_exchange_for_account(a, purpose="read")
                 ex_id = _exchange_id(ex)
-                fut_type = "swap" if ex_id in ("hyperliquid", "okx") else "future"
+                fut_type = "swap" if ex_id in ("hyperliquid", "okx", "gate") else "future"
                 params: dict[str, Any] = {"type": fut_type}
                 if ex_id == "hyperliquid":
                     params["user"] = str(a.get("api_key") or "")
@@ -3223,7 +2864,7 @@ def _strip_secret_from_payload(body: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/order")
 def api_order():
-    """浏览器手动测试下单；须指定 account_id。默认走账户模板/固定USDT下单逻辑。"""
+    """浏览器手动测试下单；须指定 account_id，并在 payload 中提供 quote_amount（USDT）。"""
     bad = dashboard_auth_response_if_invalid()
     if bad:
         return bad
@@ -3265,26 +2906,8 @@ def api_order():
         if not use_base_amount and op is not None:
             if op.get("quote_amount") is not None:
                 manual_quote_usdt = _to_float(op.get("quote_amount"))
-            elif op.get("_sizing_mode") == "fixed_quote":
-                manual_quote_usdt = _to_float(a.get("fixed_quote_usdt"))
         ex_ms = _order_exchange_timestamp_ms(order)
         side_v = str(order.get("side") or "")
-        sl_order, sl_err = _maybe_place_stop_loss_after_market(ex, order, ro)
-        cancel_res: dict[str, Any] = {}
-        if (
-            BINANCE_DEFAULT_TYPE == "future"
-            and _is_binance_exchange(ex)
-            and ro
-            and should_cancel_stop_loss_on_reduce(
-                ex, str(order.get("symbol") or ""), payload, ro
-            )
-        ):
-            sym_u = str(order.get("symbol") or "")
-            if sym_u:
-                cancelled, cerr = cancel_open_stop_loss_algo_orders(ex, sym_u)
-                cancel_res["stop_loss_cancelled"] = cancelled
-                if cerr:
-                    cancel_res["stop_loss_cancel_error"] = cerr
         t_trade_done = time.time()
         receive_signal_ms = round((t_exec_start - t_total_start) * 1000, 2)
         execute_trade_ms = round((t_trade_done - t_exec_start) * 1000, 2)
@@ -3310,8 +2933,6 @@ def api_order():
             execute_trade_ms=execute_trade_ms,
             total_trade_ms=total_trade_ms,
             server_latency_ms=total_trade_ms,
-            stop_loss_order_id=str(sl_order.get("id") or "") if sl_order else None,
-            stop_loss_error=sl_err,
             **_order_summary_for_log(
                 order, exchange=ex, symbol=str(order.get("symbol") or "")
             ),
@@ -3326,9 +2947,6 @@ def api_order():
                 if use_base_amount
                 else (op.get("quote_amount") if op and op.get("quote_amount") is not None else None),
                 "sizing_mode": sizing_mode,
-                "stop_loss_order": sl_order,
-                "stop_loss_error": sl_err,
-                **cancel_res,
             }
         )
     except Exception as e:
@@ -3347,9 +2965,7 @@ def api_order():
                 side=sh,
                 reduce_only=ro,
                 action=_service_action_label(ro, sh),
-                quote_usdt=float(a.get("fixed_quote_usdt") or 0)
-                if not use_base_amount
-                else None,
+                quote_usdt=None,
                 order_id=None,
                 error=str(e),
                 exchange_timestamp_ms=None,
@@ -3580,505 +3196,6 @@ def api_account_log_delete():
     )
 
 
-def _parse_trailing_blacklist(raw: Any) -> set[str]:
-    out: set[str] = set()
-    if raw is None:
-        return out
-    if isinstance(raw, list):
-        for x in raw:
-            s = str(x).strip()
-            if s:
-                out.add(s)
-        return out
-    s = str(raw).strip()
-    if not s:
-        return out
-    for part in re.split(r"[\s,;，；]+", s):
-        p = part.strip()
-        if p:
-            out.add(p)
-    return out
-
-
-def _trailing_stop_thread_main(
-    account: dict[str, Any],
-    params: dict[str, Any],
-    stop_event: threading.Event,
-    task: dict[str, Any],
-) -> None:
-    aid = str(account.get("id") or "")
-    try:
-        ex = get_exchange_for_account(account, purpose="trade")
-        lock = _get_account_trade_lock(aid)
-        with lock:
-            ex.load_markets()
-
-        def _hook(msg: str) -> None:
-            task["last_status"] = str(msg)[:2000]
-
-        # 旧任务 params 里可能没有 exchange_algo_type，曾误默认 stop_market → 选「限价追踪」仍走 STOP_MARKET 市价腿
-        _raw_eat = params.get("exchange_algo_type")
-        _tpm = str(params.get("take_profit_mode") or "").strip().lower()
-        if _raw_eat is None or str(_raw_eat).strip() == "":
-            resolved_eat = "stop_limit" if _tpm == "track" else "stop_market"
-        else:
-            resolved_eat = str(_raw_eat).strip().lower()
-        if resolved_eat not in ("stop_market", "stop_limit"):
-            resolved_eat = "stop_market"
-        params["exchange_algo_type"] = resolved_eat
-
-        def _on_trailing_close(data: dict[str, Any]) -> None:
-            try:
-                _record_trailing_close_log(
-                    account,
-                    ex,
-                    data["order"],
-                    symbol=str(data.get("symbol") or ""),
-                    side=str(data.get("side") or ""),
-                    current_tier=data.get("current_tier"),
-                )
-            except Exception as err:
-                logger.exception(
-                    "移动止盈[%s] 写入交易记录失败: %s", aid, err
-                )
-
-        worker = TrailingStopWorker(
-            ex,
-            account_id=aid,
-            trade_lock=lock,
-            normalize_symbol_fn=normalize_symbol,
-            stop_loss_pct=float(params["stop_loss_pct"]),
-            low_trail_stop_loss_pct=float(params["low_trail_stop_loss_pct"]),
-            trail_stop_loss_pct=float(params["trail_stop_loss_pct"]),
-            higher_trail_stop_loss_pct=float(params["higher_trail_stop_loss_pct"]),
-            third_trail_stop_loss_pct=float(params.get("third_trail_stop_loss_pct", 0.5)),
-            low_trail_profit_threshold=float(params["low_trail_profit_threshold"]),
-            first_trail_profit_threshold=float(params["first_trail_profit_threshold"]),
-            second_trail_profit_threshold=float(params["second_trail_profit_threshold"]),
-            third_trail_profit_threshold=float(params.get("third_trail_profit_threshold", 2.1)),
-            feishu_webhook=params.get("feishu_webhook") or None,
-            blacklist=params.get("blacklist") or set(),
-            status_hook=_hook,
-            use_last_price=bool(params.get("use_last_price")),
-            use_last_price_only=bool(params.get("use_last_price_only")),
-            close_mode=str(params.get("close_mode") or "market"),
-            limit_offset_bps=float(params.get("limit_offset_bps", 25)),
-            low_offset_bps=params.get("low_offset_bps"),
-            first_offset_bps=params.get("first_offset_bps"),
-            second_offset_bps=params.get("second_offset_bps"),
-            third_offset_bps=params.get("third_offset_bps"),
-            trailing_exec=str(params.get("trailing_exec") or "signal"),
-            exchange_algo_type=resolved_eat,
-            testnet=USE_TESTNET,
-            close_log_hook=_on_trailing_close,
-        )
-        worker.restore_existing_algos()
-        _idle_sec = float(params.get("idle_no_position_sec", 10))
-        _monitor_int = float(params["monitor_interval"])
-        if _idle_sec <= 0 or _idle_sec < _monitor_int:
-            _idle_sec = max(_monitor_int * 2, 5)
-        worker.run_loop(
-            stop_event,
-            _monitor_int,
-            _idle_sec,
-        )
-    except Exception as e:
-        logger.exception("移动止盈线程异常 账户=%s", aid)
-        task["last_status"] = f"线程异常退出: {e}"
-    finally:
-        with _trailing_stop_tasks_lock:
-            cur = _trailing_stop_tasks.get(aid)
-            if cur is task:
-                cur["running"] = False
-                cur["stopped_at"] = datetime.now(timezone.utc).isoformat()
-                # 线程结束即从注册表移除，避免前端长期显示「已停止」的僵尸任务
-                _trailing_stop_tasks.pop(aid, None)
-
-
-@app.get("/trailing-stop")
-def trailing_stop_dashboard():
-    resp = send_from_directory(app.static_folder, "trailing_stop.html")
-    # 禁用浏览器缓存，确保前端 UI 改动立即生效
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp.headers["Pragma"] = "no-cache"
-    resp.headers["Expires"] = "0"
-    return resp
-
-
-@app.get("/api/trailing-stop/status")
-def api_trailing_stop_status():
-    bad = dashboard_auth_response_if_invalid(allow_viewer=True)
-    if bad:
-        return bad
-    role = dashboard_auth_role()
-    with _trailing_stop_tasks_lock:
-        snap = dict(_trailing_stop_tasks)
-    out: list[dict[str, Any]] = []
-    for aid, t in snap.items():
-        params = t.get("params")
-        if role == "viewer" and isinstance(params, dict):
-            p2 = dict(params)
-            if p2.get("feishu_webhook"):
-                p2["feishu_webhook"] = "(已配置，访客不可见)"
-            params = p2
-        out.append(
-            {
-                "account_id": aid,
-                "remark": t.get("remark"),
-                "exchange": t.get("exchange"),
-                "running": bool(t.get("running")),
-                "started_at": t.get("started_at"),
-                "stopped_at": t.get("stopped_at"),
-                "last_status": t.get("last_status"),
-                "params": params,
-            }
-        )
-    return jsonify({"ok": True, "tasks": out})
-
-
-@app.post("/api/trailing-stop/start")
-def api_trailing_stop_start():
-    bad = dashboard_auth_response_if_invalid()
-    if bad:
-        return bad
-    if BINANCE_DEFAULT_TYPE != "future":
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "移动止盈仅支持永续合约模式",
-                    "hint": "请在 .env 设置 BINANCE_DEFAULT_TYPE=future 并重启（币安 U 本位；OKX 将映射为 SWAP）。",
-                }
-            ),
-            400,
-        )
-    body = request.get_json(silent=True) or {}
-    aid = str(body.get("account_id") or "").strip()
-    if not aid:
-        return jsonify({"ok": False, "error": "请指定 account_id"}), 400
-    acc = _account_by_id(aid)
-    if not acc:
-        return jsonify({"ok": False, "error": "找不到该交易账户"}), 400
-    exn = (acc.get("exchange") or "binance").lower()
-    if exn == "hyperliquid":
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "移动止盈暂不支持 Hyperliquid",
-                    "hint": "请使用币安或 OKX 账户。",
-                }
-            ),
-            400,
-        )
-    if exn not in ("binance", "okx"):
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "移动止盈仅支持币安或 OKX 账户",
-                    "hint": "其它交易所请使用自带止盈止损或其它工具。",
-                }
-            ),
-            400,
-        )
-    if not (acc.get("api_key") or "").strip() or not (acc.get("secret") or "").strip():
-        return jsonify({"ok": False, "error": "该账户未配置 API Key / Secret"}), 400
-
-    try:
-        monitor_interval = float(body.get("monitor_interval", 1))
-    except (TypeError, ValueError):
-        monitor_interval = 1.0
-    if monitor_interval < 0.1 or monitor_interval > 120:
-        return jsonify({"ok": False, "error": "monitor_interval 须在 0.1～120 秒之间"}), 400
-
-    try:
-        idle_no_position_sec = float(body.get("idle_no_position_sec", 10))
-    except (TypeError, ValueError):
-        idle_no_position_sec = 10.0
-    if idle_no_position_sec < 5 or idle_no_position_sec > 120:
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "idle_no_position_sec（无持仓轮询间隔）须在 5～120 秒之间",
-                }
-            ),
-            400,
-        )
-
-    raw_last = body.get("use_last_price")
-    if isinstance(raw_last, str):
-        use_last_price = raw_last.strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-            "last",
-        )
-    else:
-        use_last_price = bool(raw_last)
-
-    raw_only = body.get("use_last_price_only")
-    if isinstance(raw_only, str):
-        use_last_price_only = raw_only.strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-    else:
-        use_last_price_only = bool(raw_only)
-    if not use_last_price:
-        use_last_price_only = False
-
-    exchange_algo_type = "stop_market"
-    tpm_in = body.get("take_profit_mode")
-    if tpm_in is not None:
-        t = str(tpm_in).strip().lower()
-        if t in ("market", "市价", "m"):
-            close_mode_str = "market"
-            trailing_exec = "signal"
-        elif t in ("track", "限价", "追踪", "limit_track", "l"):
-            # 所里用条件 STOP+限价；程序代为平仓时仅走 IOC 限价，不转市价（见 TrailingStopWorker.close_position）
-            close_mode_str = "limit_ioc"
-            trailing_exec = "exchange_stop"
-            exchange_algo_type = "stop_limit"
-        else:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "take_profit_mode 仅支持 market（市价止盈/平仓）或 track（条件限价 STOP：触发后以 GTC 限价委托，按有仓间隔撤挂刷新）",
-                    }
-                ),
-                400,
-            )
-        try:
-            limit_offset_bps = float(body.get("limit_offset_bps", 25))
-        except (TypeError, ValueError):
-            limit_offset_bps = 25.0
-        if limit_offset_bps < 0 or limit_offset_bps > 500:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "limit_offset_bps 须在 0～500",
-                    }
-                ),
-                400,
-            )
-        take_profit_mode = "track" if trailing_exec == "exchange_stop" else "market"
-    else:
-        raw_close = body.get("close_mode") or "market"
-        close_mode_str = str(raw_close).strip().lower()
-        if close_mode_str == "limit":
-            close_mode_str = "limit_ioc"
-        if close_mode_str not in ("market", "limit_ioc"):
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "close_mode 仅支持 market（市价）或 limit（限价 IOC）",
-                    }
-                ),
-                400,
-            )
-
-        raw_exec = body.get("trailing_exec") or "signal"
-        trailing_exec = str(raw_exec).strip().lower()
-        if trailing_exec in ("exchange", "stop", "algo"):
-            trailing_exec = "exchange_stop"
-        if trailing_exec not in ("signal", "exchange_stop"):
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "trailing_exec 仅支持 signal（轮询触发平仓）或 exchange_stop（交易所 STOP 线按间隔刷新）",
-                    }
-                ),
-                400,
-            )
-        try:
-            limit_offset_bps = float(body.get("limit_offset_bps", 25))
-        except (TypeError, ValueError):
-            limit_offset_bps = 25.0
-        if limit_offset_bps < 0 or limit_offset_bps > 500:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "limit_offset_bps 须在 0～500（基点，25≈触发与限价相差 0.25%）",
-                    }
-                ),
-                400,
-            )
-        take_profit_mode = (
-            "track"
-            if trailing_exec == "exchange_stop"
-            else ("market" if close_mode_str == "market" else "limit_ioc")
-        )
-        exchange_algo_type = str(body.get("exchange_algo_type") or "stop_market").strip().lower()
-        if exchange_algo_type not in ("stop_market", "stop_limit"):
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "exchange_algo_type 仅支持 stop_market 或 stop_limit（仅 trailing_exec=exchange_stop 时生效）",
-                    }
-                ),
-                400,
-            )
-        if trailing_exec != "exchange_stop":
-            exchange_algo_type = "stop_market"
-
-    def _req_pct(name: str, default: float | None = None) -> float:
-        if name not in body and default is not None:
-            return float(default)
-        v = body.get(name)
-        if v is None:
-            raise ValueError(f"缺少数字字段 {name}")
-        return float(v)
-
-    def _opt_float_local(name: str) -> float | None:
-        v = body.get(name)
-        if v is None or v == "":
-            return None
-        try:
-            f = float(v)
-            return f if f >= 0 else None
-        except (TypeError, ValueError):
-            return None
-
-    try:
-        p = {
-            "monitor_interval": monitor_interval,
-            "idle_no_position_sec": idle_no_position_sec,
-            "use_last_price": use_last_price,
-            "use_last_price_only": use_last_price_only,
-            "take_profit_mode": take_profit_mode,
-            "close_mode": close_mode_str,
-            "limit_offset_bps": limit_offset_bps,
-            "low_offset_bps": _opt_float_local("low_offset_bps"),
-            "first_offset_bps": _opt_float_local("first_offset_bps"),
-            "second_offset_bps": _opt_float_local("second_offset_bps"),
-            "third_offset_bps": _opt_float_local("third_offset_bps"),
-            "trailing_exec": trailing_exec,
-            "exchange_algo_type": exchange_algo_type,
-            "stop_loss_pct": _req_pct("stop_loss_pct", 50),
-            "low_trail_stop_loss_pct": _req_pct("low_trail_stop_loss_pct", 0.2),
-            "trail_stop_loss_pct": _req_pct("trail_stop_loss_pct", 0.2),
-            "higher_trail_stop_loss_pct": _req_pct("higher_trail_stop_loss_pct", 0.4),
-            "third_trail_stop_loss_pct": _req_pct("third_trail_stop_loss_pct", 0.5),
-            "low_trail_profit_threshold": _req_pct("low_trail_profit_threshold", 0.9),
-            "first_trail_profit_threshold": _req_pct("first_trail_profit_threshold", 1),
-            "second_trail_profit_threshold": _req_pct("second_trail_profit_threshold", 1.5),
-            "third_trail_profit_threshold": _req_pct("third_trail_profit_threshold", 2.1),
-        }
-    except (TypeError, ValueError) as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-    if p["stop_loss_pct"] <= 0 or p["stop_loss_pct"] > 50:
-        return jsonify({"ok": False, "error": "stop_loss_pct 须在 0～50 之间（不含 0）"}), 400
-    for key, label in (
-        ("trail_stop_loss_pct", "第一档回撤比例"),
-        ("higher_trail_stop_loss_pct", "第二档回撤比例"),
-        ("third_trail_stop_loss_pct", "第三档回撤比例"),
-    ):
-        v = float(p[key])
-        if v <= 0 or v > 1:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": f"{label}（{key}）须在 0～1 之间，例如 0.3 表示从最高浮盈回撤 30%",
-                    }
-                ),
-                400,
-            )
-
-    lo = float(p["low_trail_profit_threshold"])
-    fi = float(p["first_trail_profit_threshold"])
-    se = float(p["second_trail_profit_threshold"])
-    th = float(p["third_trail_profit_threshold"])
-    if not (lo < fi < se < th):
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "分档浮盈阈值须严格递增：低档 < 第一档 < 第二档 < 第三档（例如 0.9 < 1.0 < 1.5 < 2.1）",
-                }
-            ),
-            400,
-        )
-
-    feishu = body.get("feishu_webhook")
-    if feishu is not None and str(feishu).strip():
-        p["feishu_webhook"] = str(feishu).strip()
-    else:
-        p["feishu_webhook"] = None
-    p["blacklist"] = _parse_trailing_blacklist(body.get("blacklist"))
-
-    with _trailing_stop_tasks_lock:
-        existing = _trailing_stop_tasks.get(aid)
-        if existing and existing.get("running"):
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "该账户已在运行移动止盈",
-                        "hint": "请先停止后再启动。",
-                    }
-                ),
-                409,
-            )
-        stop_ev = threading.Event()
-        task: dict[str, Any] = {
-            "stop": stop_ev,
-            "thread": None,
-            "running": True,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "stopped_at": None,
-            "remark": acc.get("remark"),
-            "exchange": acc.get("exchange") or "binance",
-            "last_status": "启动中…",
-            "params": {k: v for k, v in p.items() if k != "blacklist"}
-            | {"blacklist": sorted(p["blacklist"])},
-        }
-        th = threading.Thread(
-            target=_trailing_stop_thread_main,
-            args=(acc, p, stop_ev, task),
-            name=f"trailing-stop-{aid[:8]}",
-            daemon=True,
-        )
-        task["thread"] = th
-        _trailing_stop_tasks[aid] = task
-        th.start()
-    return jsonify({"ok": True, "account_id": aid, "started_at": task["started_at"]})
-
-
-@app.post("/api/trailing-stop/stop")
-def api_trailing_stop_stop():
-    bad = dashboard_auth_response_if_invalid()
-    if bad:
-        return bad
-    body = request.get_json(silent=True) or {}
-    aid = str(body.get("account_id") or "").strip()
-    if not aid:
-        return jsonify({"ok": False, "error": "请指定 account_id"}), 400
-    with _trailing_stop_tasks_lock:
-        task = _trailing_stop_tasks.get(aid)
-        if not task or not task.get("running"):
-            return jsonify({"ok": False, "error": "该账户没有运行中的移动止盈"}), 400
-        stop: threading.Event = task["stop"]
-        th: threading.Thread | None = task.get("thread")
-        stop.set()
-    if th is not None:
-        th.join(timeout=30.0)
-    with _trailing_stop_tasks_lock:
-        # 线程 finally 里可能已 pop；幂等清理
-        _trailing_stop_tasks.pop(aid, None)
-    return jsonify({"ok": True, "account_id": aid})
 
 
 def _finalize_webhook_results_after_delay(
@@ -4103,37 +3220,10 @@ def _finalize_webhook_results_after_delay(
             continue
         try:
             ex = task["exchange"]
-            ro = bool(task["reduce_only"])
             order = _merge_order_with_fetch(ex, task["order"])
-            payload_for_post = dict(task["payload"])
-            sl_order, sl_err = _maybe_place_stop_loss_after_market(ex, order, ro)
-            cancel_res: dict[str, Any] = {}
-            if (
-                BINANCE_DEFAULT_TYPE == "future"
-                and _is_binance_exchange(ex)
-                and ro
-                and should_cancel_stop_loss_on_reduce(
-                    ex, str(order.get("symbol") or ""), payload_for_post, ro
-                )
-            ):
-                sym_u = str(order.get("symbol") or "")
-                if sym_u:
-                    cancelled, cerr = cancel_open_stop_loss_algo_orders(ex, sym_u)
-                    cancel_res["stop_loss_cancelled"] = cancelled
-                    if cerr:
-                        cancel_res["stop_loss_cancel_error"] = cerr
-                    if cancelled:
-                        logger.info(
-                            "持仓已平/全平：已取消 %s 上止损条件单 %s 笔",
-                            sym_u,
-                            len(cancelled),
-                        )
             row = dict(base)
             row["order"] = order
-            row["stop_loss_order"] = sl_order
-            row["stop_loss_error"] = sl_err
             row.pop("post_process", None)
-            row.update(cancel_res)
             finalized.append(row)
         except Exception as e:
             logger.exception("账户 %s 后处理失败", base.get("account_id"))
@@ -4169,12 +3259,12 @@ def webhook():
         return auth_err
     targets = webhook_accounts()
     if not targets:
-        logger.error("无可用交易账户（请添加账户、填写密钥、配置模板本金或固定金额，并勾选参与 Webhook）")
+        logger.error("无可用交易账户（请添加账户、填写密钥，并勾选参与 Webhook）")
         return (
             jsonify(
                 {
                     "ok": False,
-                    "error": "无可用交易账户：请在控制台添加账户、保存 API，并设置账户模板本金或固定下单 USDT 与 Webhook 跟单。",
+                    "error": "无可用交易账户：请在控制台添加账户并保存 API 密钥。",
                 }
             ),
             503,
@@ -4227,7 +3317,7 @@ def webhook():
                         "skipped": True,
                         "reason": "webhook_open_only",
                         "infer_source": infer_src,
-                        "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单（止盈请用移动止盈）",
+                        "message": "已启用仅开仓：本次为减仓/平仓类信号，未下单（止盈请使用交易所自带止盈止损）",
                     }
                 )
         except Exception as e:
@@ -4260,12 +3350,8 @@ def webhook():
             "order": order,
             "_is_reversal": bool(op.get("_is_reversal")),
             "_resolved_reduce_only": ro,
-            "fixed_quote_usdt": account.get("fixed_quote_usdt"),
             "used_quote_usdt": op.get("quote_amount"),
             "sizing_mode": op.get("_sizing_mode"),
-            "template_scale": op.get("_template_scale"),
-            "stop_loss_order": None,
-            "stop_loss_error": None,
             "post_process": f"delayed_{int(WEBHOOK_POST_DELAY_SEC)}s",
         }
         task_row = {
@@ -4334,22 +3420,14 @@ def webhook():
 
 
 def graceful_shutdown(signum: int, frame) -> None:
-    """收到 SIGINT/SIGTERM 时优雅关闭：停止移动止盈线程，刷日志到磁盘。"""
+    """收到 SIGINT/SIGTERM 时优雅关闭：刷日志到磁盘、停止 TP/SL 监控。"""
     logger.info("收到退出信号 %s，开始优雅关闭...", signum)
 
-    # 1. 停止所有移动止盈线程
-    with _trailing_stop_tasks_lock:
-        for aid, task in list(_trailing_stop_tasks.items()):
-            if task.get("running"):
-                stop_ev: threading.Event = task["stop"]
-                stop_ev.set()
-                th: threading.Thread | None = task.get("thread")
-                if th is not None:
-                    logger.info("正在等待移动止盈线程 %s 结束（最长 5 秒）...", aid[:8])
-                    th.join(timeout=5.0)
-                _trailing_stop_tasks.pop(aid, None)
+    try:
+        get_monitor().stop()
+    except Exception:
+        pass
 
-    # 2. 刷日志到磁盘
     with _LOG_LOCK:
         _save_execution_log()
         _save_signal_log()
@@ -4375,6 +3453,15 @@ def main():
     if PRELOAD_MARKETS_ON_STARTUP:
         start_preload_trade_markets_in_background()
     _get_webhook_finalize_executor()
+
+    # 如果 TP/SL 监控配置中 enabled=true，自动启动
+    tp_cfg = load_tp_sl_config()
+    if tp_cfg.get("enabled") and tp_cfg.get("account_id"):
+        try:
+            get_monitor().start()
+            logger.info("TP/SL 监控已在启动时自动恢复")
+        except Exception as e:
+            logger.warning("TP/SL 监控自动启动失败: %s", e)
 
     # 注册优雅关闭信号
     signal.signal(signal.SIGINT, graceful_shutdown)

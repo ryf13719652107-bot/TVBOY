@@ -268,7 +268,6 @@
       margin-top: 0.35rem;
     }
     .stop-loss-inline > .sl-pct { flex: 1; min-width: 9rem; max-width: 15rem; }
-    #templateBaseWrap.template-base-dim input { background: var(--elevated); color: var(--muted); }
     .copy-row { display: flex; gap: 0.5rem; align-items: stretch; }
     .copy-row textarea { flex: 1; min-height: 72px; }
     a { color: var(--accent); text-decoration: none; }
@@ -606,12 +605,12 @@
     <nav class="tabs" role="tablist" aria-label="主菜单">
       <button type="button" class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">概览</button>
       <button type="button" class="tab-btn" data-tab="accounts" role="tab" aria-selected="false">交易账户</button>
-      <button type="button" class="tab-btn" data-tab="trailing" role="tab" aria-selected="false">移动止盈</button>
       <button type="button" class="tab-btn" data-tab="account" role="tab" aria-selected="false">账户信息</button>
       <button type="button" class="tab-btn" data-tab="logs" role="tab" aria-selected="false">运行日志</button>
       <button type="button" class="tab-btn" data-tab="trades" role="tab" aria-selected="false">交易记录</button>
       <button type="button" class="tab-btn" data-tab="tv" role="tab" aria-selected="false">TradingView</button>
       <button type="button" class="tab-btn" data-tab="signallog" role="tab" aria-selected="false">信号日志</button>
+      <button type="button" class="tab-btn" data-tab="tpsl" role="tab" aria-selected="false">止盈止损</button>
     </nav>
 
     <div id="panel-overview" class="tab-panel active" role="tabpanel">
@@ -632,53 +631,12 @@
         </div>
       </div>
     </div>
-    <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">机器人设置 <span class="help-tip" tabindex="0" data-tip="全局模板本金只在「跟随模板下单」时参与计算。开仓后止损仅币安 U 本位合约生效。">?</span></h2>
-
-      <div class="settings-section">
-        <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
-          Webhook 跟单
-          <span class="help-tip" id="webhookSectionTip" tabindex="0" data-tip="跟单模式、仅开仓、生成 JSON 在「TradingView」标签里设置。">?</span>
-        </div>
-        <div class="field-stack" id="templateBaseWrap" style="margin-top: 0.75rem;">
-          <label for="templateBaseCapitalUsdt" class="label-with-tip">
-            <span class="label-text">全局模板本金（USDT）</span>
-            <span class="help-tip" id="templateBaseTip" tabindex="0" data-tip="">?</span>
-          </label>
-          <input type="number" id="templateBaseCapitalUsdt" min="0" step="0.01" value="1000" />
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;flex-wrap:wrap;">
-          开仓后止损
-          <span class="help-tip" tabindex="0" data-tip="仅币安 U 本位合约：Webhook 成交后自动挂止损单。OKX 请用移动止盈。">?</span>
-        </div>
-        <div class="stop-loss-inline">
-          <label class="sl-check label-with-tip" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;">
-            <input type="checkbox" id="stopLossEnabled" />
-            <span class="label-text">成交后挂止损</span>
-          </label>
-          <div class="sl-pct">
-            <label for="stopLossPct" class="label-with-tip">
-              <span class="label-text">止损 %</span>
-              <span class="help-tip" tabindex="0" data-tip="相对开仓均价的亏损百分比，例如 3 表示跌 3% 止损。">?</span>
-            </label>
-            <input type="number" id="stopLossPct" min="0.01" max="50" step="0.01" value="3.33" />
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-actions">
-        <button type="button" class="secondary" id="btnSaveBotSettings" disabled>保存设置</button>
-      </div>
-    </div>
     <p id="healthLine" class="health-strip">近 24h 失败：—</p>
     </div>
 
     <div id="panel-accounts" class="tab-panel" role="tabpanel">
     <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">交易账户 <span class="help-tip" tabindex="0" data-tip="填交易所 API，勾选 Webhook 才会跟 TV 信号。币安：Key + Secret。OKX 还要 Passphrase。模板本金/固定 USDT 只在「跟随模板下单」时用。">?</span></h2>
+      <h2 class="title-line">交易账户 <span class="help-tip" tabindex="0" data-tip="填交易所 API。Binance/Gate：Key + Secret。OKX 还要 Passphrase。Hyperliquid：walletAddress + privateKey。Webhook 下单金额由 TV 告警中的 quote_amount 决定。">?</span></h2>
       <p class="hint" id="accountsHint" style="margin-top: 0.35rem; min-height: 1.1em;"></p>
       <div class="table-wrap" id="accountsTableWrap" style="display: none; max-height: none;">
         <table class="siglog" id="accountsTable" style="font-size: 0.78rem;">
@@ -690,166 +648,8 @@
         <button type="button" class="secondary" id="btnAddAccount" disabled>添加账户</button>
         <button type="button" id="btnSaveAccounts" disabled>保存全部</button>
         <button type="button" class="secondary" id="btnReloadAccounts" disabled>重新加载</button>
-        <span class="help-tip" tabindex="0" data-tip="Secret 留空=不修改原密钥。模板本金：按比例跟单用。固定 USDT：TV 没带数量时的兜底。Webhook 勾选=参与跟单。">?</span>
+        <span class="help-tip" tabindex="0" data-tip="Secret 留空=不修改原密钥。下单金额由 TV 告警 quote_amount 决定。">?</span>
       </div>
-    </div>
-    </div>
-
-    <div id="panel-trailing" class="tab-panel" role="tabpanel">
-    <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">移动止盈 <span class="help-tip" tabindex="0" data-tip="有持仓时按浮盈分档锁利润，到线自动平仓。TV 可设「仅开仓」，平仓交给这里。支持币安 U 本位、OKX 永续。">?</span></h2>
-      <p class="hint" id="trailingHintTop" style="min-height: 1.1em;"></p>
-      <label for="accountSelectTrailing" class="label-with-tip">
-        <span class="label-text">账户</span>
-      </label>
-      <select id="accountSelectTrailing"></select>
-      <div id="trailingRunStat" class="stat" style="margin-top: 0.75rem; white-space: pre-wrap; word-break: break-word;">—</div>
-    </div>
-    <div class="card" style="margin-bottom: 1rem;">
-      <h2 class="title-line">参数 <span class="help-tip" tabindex="0" data-tip="改完参数后点「启动」。已在跑的需先停止再启动才会用新参数。分档阈值须满足：低档 &lt; 第一档 &lt; 第二档 &lt; 第三档。">?</span></h2>
-      <div class="row" style="margin-top: 0.35rem;">
-        <div>
-          <label for="trailingPriceSource" class="label-with-tip">
-            <span class="label-text">浮盈计价</span>
-            <span class="help-tip" tabindex="0" data-tip="标记价：交易所参考价（推荐）。最新价(保守)：标记价与最新价取较小。仅最新价：完全按最新成交。">?</span>
-          </label>
-          <select id="trailingPriceSource">
-            <option value="mark">标记价</option>
-            <option value="last" selected>最新价（保守）</option>
-            <option value="last_only">仅最新价</option>
-          </select>
-        </div>
-        <div>
-          <label for="trailingMonitorInterval" class="label-with-tip">
-            <span class="label-text">有仓监控间隔（秒）</span>
-          </label>
-          <input type="number" id="trailingMonitorInterval" min="0.3" max="120" step="0.1" value="0.3" />
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingIdleNoPosition" class="label-with-tip">
-            <span class="label-text">无仓轮询（秒）</span>
-          </label>
-          <input type="number" id="trailingIdleNoPosition" min="5" max="120" step="1" value="10" />
-        </div>
-        <div>
-          <label for="trailingStopLossPct" class="label-with-tip">
-            <span class="label-text">止损 %</span>
-            <span class="help-tip" tabindex="0" data-tip="相对开仓价亏损达到该百分比时平仓（硬止损，与移动止盈分档无关）。">?</span>
-          </label>
-          <input type="number" id="trailingStopLossPct" min="0.01" step="0.01" value="50" />
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingTakeProfitMode" class="label-with-tip">
-            <span class="label-text">平仓方式</span>
-            <span class="help-tip" tabindex="0" data-tip="条件限价追踪：在交易所挂条件单，更稳。市价：触发后直接市价平。若经常触发却未成交，可加大「触发→委托价差」。">?</span>
-          </label>
-          <select id="trailingTakeProfitMode">
-            <option value="market">市价</option>
-            <option value="track" selected>条件限价追踪</option>
-          </select>
-        </div>
-        <div>
-          <label for="trailingTrackLimitOffsetBps" class="label-with-tip">
-            <span class="label-text">触发→委托价差（基点）</span>
-            <span class="help-tip" tabindex="0" data-tip="条件单触发价与委托价的距离。各档滑点留空时用此默认值。100 基点 = 1%。">?</span>
-          </label>
-          <input type="number" id="trailingTrackLimitOffsetBps" min="0" max="500" step="1" value="25" />
-        </div>
-      </div>
-      <div class="settings-section-title" style="display:flex;align-items:center;gap:0.35rem;margin-top:0.85rem;">
-        分档止盈
-        <span class="help-tip" tabindex="0" data-tip="浮盈涨到各档阈值后进入该档；从最高点回撤超过设定比例则平仓。回撤比例填 0～1，如 0.2 表示回撤 20%。">?</span>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingLowTrailProfit">低档阈值 %</label>
-          <input type="number" id="trailingLowTrailProfit" min="0" step="0.1" value="0.9" />
-        </div>
-        <div>
-          <label for="trailingLowTrailStop">低档底线 %</label>
-          <input type="number" id="trailingLowTrailStop" step="0.01" value="0.2" />
-        </div>
-        <div>
-          <label for="trailingLowOffsetBps">低档滑点（基点）</label>
-          <input type="number" id="trailingLowOffsetBps" min="0" max="500" step="1" value="5" placeholder="留空用全局" />
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingFirstTrailProfit">第一档阈值 %</label>
-          <input type="number" id="trailingFirstTrailProfit" min="0" step="0.1" value="1" />
-        </div>
-        <div>
-          <label for="trailingTrailStopLossPct">第一档回撤</label>
-          <input type="number" id="trailingTrailStopLossPct" min="0.01" max="1" step="0.01" value="0.2" />
-        </div>
-        <div>
-          <label for="trailingFirstOffsetBps">第一档滑点（基点）</label>
-          <input type="number" id="trailingFirstOffsetBps" min="0" max="500" step="1" value="15" placeholder="留空用全局" />
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingSecondTrailProfit">第二档阈值 %</label>
-          <input type="number" id="trailingSecondTrailProfit" min="0" step="0.1" value="1.5" />
-        </div>
-        <div>
-          <label for="trailingHigherTrailStopPct">第二档回撤</label>
-          <input type="number" id="trailingHigherTrailStopPct" min="0.01" max="1" step="0.01" value="0.4" />
-        </div>
-        <div>
-          <label for="trailingSecondOffsetBps">第二档滑点（基点）</label>
-          <input type="number" id="trailingSecondOffsetBps" min="0" max="500" step="1" value="20" placeholder="留空用全局" />
-        </div>
-      </div>
-      <div class="row" style="margin-top: 0.65rem;">
-        <div>
-          <label for="trailingThirdTrailProfit">第三档阈值 %</label>
-          <input type="number" id="trailingThirdTrailProfit" min="0" step="0.1" value="2.1" />
-        </div>
-        <div>
-          <label for="trailingThirdTrailStopPct">第三档回撤</label>
-          <input type="number" id="trailingThirdTrailStopPct" min="0.01" max="1" step="0.01" value="0.5" />
-        </div>
-        <div>
-          <label for="trailingThirdOffsetBps">第三档滑点（基点）</label>
-          <input type="number" id="trailingThirdOffsetBps" min="0" max="500" step="1" value="30" placeholder="留空用全局" />
-        </div>
-      </div>
-      <label for="trailingFeishuWebhook" class="label-with-tip" style="margin-top: 0.75rem;">
-        <span class="label-text">飞书通知（可选）</span>
-        <span class="help-tip" tabindex="0" data-tip="填飞书机器人 Webhook，平仓时推送消息。只保存在浏览器。">?</span>
-      </label>
-      <input id="trailingFeishuWebhook" type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
-      <label for="trailingBlacklist" class="label-with-tip" style="margin-top: 0.65rem;">
-        <span class="label-text">黑名单</span>
-        <span class="help-tip" tabindex="0" data-tip="这些币种不参与移动止盈。默认屏蔽 ETH；若要管 ETH 请清空。多个用逗号或换行分隔。">?</span>
-      </label>
-      <textarea id="trailingBlacklist" rows="2" placeholder="如 BTC/USDT:USDT">ETH/USDT:USDT</textarea>
-      <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border);">
-        <label class="label-with-tip" style="margin-bottom:0.35rem;">
-          <span class="label-text">参数预设</span>
-          <span class="help-tip" tabindex="0" data-tip="把常用参数存成预设，下次点「加载」即可。存在浏览器本地。">?</span>
-        </label>
-        <div class="row" style="gap:0.35rem;margin-top:0.25rem;">
-          <select id="trailingPresetSelect" style="min-width:140px;">
-            <option value="">— 选择预设 —</option>
-          </select>
-          <button type="button" class="secondary" id="btnTrailingPresetLoad" style="font-size:0.78rem;">加载</button>
-          <button type="button" class="secondary" id="btnTrailingPresetSave" style="font-size:0.78rem;">保存当前</button>
-          <button type="button" class="secondary" id="btnTrailingPresetDelete" style="font-size:0.78rem;">删除</button>
-        </div>
-        <input type="text" id="trailingPresetName" placeholder="预设名称，如 BTC 宽止损" style="margin-top:0.35rem;font-size:0.78rem;" />
-      </div>
-      <div class="row" style="margin-top: 0.75rem; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
-        <button type="button" id="btnTrailingStart" disabled>启动</button>
-        <button type="button" class="secondary" id="btnTrailingStop" disabled>停止</button>
-      </div>
-      <p id="trailingFormHint" class="hint" style="margin-top: 0.5rem; min-height: 1.1em;"></p>
     </div>
     </div>
 
@@ -1066,38 +866,25 @@
         <div class="field-stack" style="margin-top: 0.65rem;">
             <label for="tvWebhookAccountSelect" class="label-with-tip">
               <span class="label-text">本报警使用的账户</span>
-              <span class="help-tip" id="tvWebhookAccountTip" tabindex="0" data-tip="选具体账户：一键生成会自动写入 account_id，只给这一个账户下单，不用手抄长 ID。选「全部账户跟单」：不写 account_id，所有在「交易账户」里勾选了 Webhook 的账户都会各下一笔。">?</span>
+              <span class="help-tip" id="tvWebhookAccountTip" tabindex="0" data-tip="选具体账户：一键生成会自动写入 account_id，只给这一个账户下单，不用手抄长 ID。">?</span>
             </label>
             <select id="tvWebhookAccountSelect">
-              <option value="">全部账户跟单（不指定某一账户）</option>
-            </select>
-        </div>
-        <div class="field-stack" style="margin-top: 0.65rem;">
-            <label for="webhookSizingMode" class="label-with-tip">
-              <span class="label-text">下单模式</span>
-              <span class="help-tip" id="webhookSizingModeTip" tabindex="0" data-tip="">?</span>
-            </label>
-            <select id="webhookSizingMode">
-              <option value="template_or_fixed">跟随模板下单</option>
-              <option value="follow_tv">跟随TV策略下单</option>
             </select>
         </div>
         <div class="field-stack" id="webhookOpenOnlyWrap" style="margin-top: 0.65rem;">
           <label class="sl-check label-with-tip" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;flex-wrap:wrap;">
             <input type="checkbox" id="webhookOpenOnly" />
             <span class="label-text">仅开仓</span>
-            <span class="help-tip" id="webhookOpenOnlyTip" tabindex="0" data-tip="勾选后，TV 发来的纯平仓/减仓信号会被忽略（交给移动止盈处理）；开仓、加仓、反手仍会下单。生成 JSON 时会自动带上 open_only: true。">?</span>
+            <span class="help-tip" id="webhookOpenOnlyTip" tabindex="0" data-tip="勾选后，TV 发来的纯平仓/减仓信号会被忽略；开仓、加仓、反手仍会下单。生成 JSON 时会自动带上 open_only: true。">?</span>
           </label>
         </div>
         <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
           <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
-          <button type="button" class="secondary" id="btnTvWizardSaveFollow">保存跟单模式</button>
           <button type="button" class="secondary" id="btnTvWizardCopyOutput">复制 JSON</button>
-          <span class="help-tip" tabindex="0" data-tip="「保存跟单模式」把上面选的下单模式、仅开仓写入服务器；改完记得点一下，否则刷新页面可能恢复旧设置。">?</span>
         </div>
         <label for="tvWizardOutput" class="label-with-tip" style="margin-top: 0.75rem; display:flex;">
           <span class="label-text">生成结果</span>
-          <span class="help-tip" tabindex="0" data-tip="币安：amount 填 {{strategy.order.contracts}}，表示标的币数量（如 0.01 ETH）。模板里还需 prev_market_position、market_position，机器人才能识别平仓跳过与反手。不要写 quote_amount（会被当成 USDT）。">?</span>
+          <span class="help-tip" tabindex="0" data-tip="quote_amount 为 USDT 名义金额（如 100 表示 100 USDT）。模板里还需 prev_market_position、market_position，机器人才能识别平仓跳过与反手。可将 {{strategy.order.contracts}} 替换为固定数值或 Pine 中代表 USDT 的变量。">?</span>
         </label>
         <p class="hint" id="tvWizardGenerateHint" style="margin-top: 0.35rem; font-size: 0.78rem; min-height: 1.1em;"></p>
         <textarea id="tvWizardOutput" style="min-height: 220px; font-size: 0.78rem; margin-top: 0.35rem;" placeholder="点「一键生成」后 JSON 会出现在这里…"></textarea>
@@ -1153,6 +940,97 @@
       </div>
     </div>
 
+    <div id="panel-tpsl" class="tab-panel" role="tabpanel">
+    <div class="grid grid-2" style="margin-bottom: 1rem;">
+      <div class="card">
+        <h2 class="title-line">止盈止损设置 <span class="help-tip" tabindex="0" data-tip="配合「仅开仓」策略使用。监控账户持仓，自动挂止盈/止损单，支持保本止损（盈利达标后移动止损到成本价）。">?</span></h2>
+        <div class="field-stack" style="margin-top: 0.75rem;">
+          <label for="tpslAccountSelect" class="label-with-tip">
+            <span class="label-text">交易账户</span>
+            <span class="help-tip" tabindex="0" data-tip="选择要监控的账户（仅显示已启用的账户）。切换账户后需重新保存并启动。">?</span>
+          </label>
+          <select id="tpslAccountSelect"></select>
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label for="tpslSymbol" class="label-with-tip">
+            <span class="label-text">币种（多交易对用逗号分隔）</span>
+            <span class="help-tip" tabindex="0" data-tip="统一格式如 ETH/USDT。多个交易对用英文逗号分隔，如 ETH/USDT,BTC/USDT。共用同一套止盈止损参数。">?</span>
+          </label>
+          <input type="text" id="tpslSymbol" value="ETH/USDT" placeholder="ETH/USDT,BTC/USDT" />
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label for="tpslTpPoints" class="label-with-tip">
+            <span class="label-text">止盈点数</span>
+            <span class="help-tip" tabindex="0" data-tip="盈利多少 USDT 价格点时挂限价止盈单。多头=入场价+点数，空头=入场价-点数。">?</span>
+          </label>
+          <input type="number" id="tpslTpPoints" value="20" step="0.1" min="0" style="max-width: 10rem;" />
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label for="tpslSlPoints" class="label-with-tip">
+            <span class="label-text">止损点数</span>
+            <span class="help-tip" tabindex="0" data-tip="亏损多少 USDT 价格点时挂止损市价单。多头=入场价-点数，空头=入场价+点数。">?</span>
+          </label>
+          <input type="number" id="tpslSlPoints" value="50" step="0.1" min="0" style="max-width: 10rem;" />
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label for="tpslBeTrigger" class="label-with-tip">
+            <span class="label-text">保本触发（盈利点数）</span>
+            <span class="help-tip" tabindex="0" data-tip="当浮动盈利达到此点数，激活保本模式。设为 0 关闭保本。">?</span>
+          </label>
+          <input type="number" id="tpslBeTrigger" value="30" step="0.1" min="0" style="max-width: 10rem;" />
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label for="tpslBeDrawdown" class="label-with-tip">
+            <span class="label-text">保本回撤（点数）</span>
+            <span class="help-tip" tabindex="0" data-tip="保本激活后，从最高点回撤超过此点数，止损立即移至入场价（保本离场）。">?</span>
+          </label>
+          <input type="number" id="tpslBeDrawdown" value="10" step="0.1" min="0" style="max-width: 10rem;" />
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <label class="sl-check label-with-tip" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;">
+            <input type="checkbox" id="tpslUseLimit" checked />
+            <span class="label-text">使用限价挂单</span>
+            <span class="help-tip" tabindex="0" data-tip="勾选=止盈挂限价单（保证价格，可能不成交）；不勾选=仅监控价格，触发时市价平仓。止损始终用市价止损单。">?</span>
+          </label>
+        </div>
+        <div class="row" style="margin-top: 1rem; gap: 0.5rem; flex-wrap: wrap;">
+          <button type="button" class="secondary" id="btnTpslSave">保存配置</button>
+          <button type="button" class="primary" id="btnTpslStart">启动监控</button>
+          <button type="button" class="secondary" id="btnTpslStop">停止监控</button>
+        </div>
+        <p class="hint" id="tpslHint" style="margin-top: 0.5rem; min-height: 1.2em;"></p>
+      </div>
+
+      <div class="card">
+        <h2 class="title-line">运行状态 <span class="help-tip" tabindex="0" data-tip="实时显示所有交易对的 TP/SL 监控状态。启动后每 3 秒自动刷新。">?</span></h2>
+        <div id="tpslStatusBox" style="margin-top: 0.5rem;">
+          <p style="margin-bottom:0.4rem; font-weight:600;">整体状态: <span id="tpslOverallState">未启动</span></p>
+          <div style="overflow-x:auto;">
+            <table id="tpslSymbolsTable" style="width:100%; font-size:0.78rem; border-collapse:collapse; display:none;">
+              <thead>
+                <tr style="border-bottom:1px solid var(--border);">
+                  <th style="text-align:left; padding:0.3rem 0.2rem;">币种</th>
+                  <th style="text-align:center; padding:0.3rem 0.2rem;">方向</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">持仓</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">入场价</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">当前价</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">峰值</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">止盈价</th>
+                  <th style="text-align:right; padding:0.3rem 0.2rem;">止损价</th>
+                  <th style="text-align:center; padding:0.3rem 0.2rem;">保本</th>
+                  <th style="text-align:center; padding:0.3rem 0.2rem;">状态</th>
+                </tr>
+              </thead>
+              <tbody id="tpslSymbolsBody"></tbody>
+            </table>
+          </div>
+          <p id="tpslNoSymbols" style="color:var(--muted); font-size:0.82rem; margin-top:0.5rem;">无监控中的交易对</p>
+          <p id="tpslLastError" style="margin-top:0.5rem; color:var(--err); font-size:0.78rem; display:none;"></p>
+        </div>
+      </div>
+    </div>
+    </div>
+
   </div>
 
   <script>
@@ -1160,9 +1038,6 @@
     /** 服务端 /api/status 返回的完整 Webhook URL（主密钥登录且已配置 TV_WEBHOOK_SECRET 时含 ?secret=） */
     let cachedWebhookUrl = null;
     let cachedWebhookUrlHasSecret = false;
-    const TRAIL_FEISHU_LS = "tv_binance_trailing_feishu_webhook";
-    const TRAIL_BLACKLIST_LS = "tv_binance_trailing_blacklist";
-    const TRAIL_PRESETS_LS = "tv_binance_trailing_presets";
     const secretEl = document.getElementById("secret");
     const statusBox = document.getElementById("statusBox");
     const btnRefreshAccount = document.getElementById("btnRefreshAccount");
@@ -1182,9 +1057,7 @@
     const accountsTableWrap = document.getElementById("accountsTableWrap");
     const accountsHint = document.getElementById("accountsHint");
     let accountsState = [];
-    let dashboardRole = null; // admin | viewer | null
-    let trailingPollTimer = null;
-    /** 交易记录表格估算手续费：名义×费率（与 .env DISPLAY_EST_FEE_RATE 同步，默认 0.0005） */
+    let dashboardRole = null;
     let displayEstFeeRate = 0.0005;
     const accOutBalance = document.getElementById("accOutBalance");
     const accBalancePlain = document.getElementById("accBalancePlain");
@@ -1201,10 +1074,8 @@
   "prev_market_position": "{{strategy.prev_market_position}}",
   "market_position": "{{strategy.market_position}}",
   "position_size": "{{strategy.position_size}}",
-  "amount": "{{strategy.order.contracts}}"
+  "quote_amount": "{{strategy.order.contracts}}"
 }`;
-    /** @deprecated 与 TV_TPL_WEBHOOK_BASE 相同，保留别名避免旧引用报错 */
-    const TV_TPL_WEBHOOK_TEMPLATE_CAPITAL = TV_TPL_WEBHOOK_BASE;
     const TV_TPL_WEBHOOK_FOLLOW_TV = TV_TPL_WEBHOOK_BASE;
 
     function fmtU(n) {
@@ -1305,9 +1176,7 @@
         const src =
           row.source === "webhook"
             ? "TV"
-            : row.source === "trailing_stop"
-              ? "移动止盈"
-              : "手动";
+            : "手动";
         const sym = [row.symbol, row.side].filter(Boolean).join(" ");
         const act = row.action
           ? escHtml(String(row.action))
@@ -1577,9 +1446,7 @@
         const src =
           row.source === "webhook"
             ? "TV"
-            : row.source === "trailing_stop"
-              ? "移动止盈"
-              : "手动";
+            : "手动";
         const oid = row.order_id ? String(row.order_id) : "—";
         const tms = row.exchange_timestamp_ms != null ? row.exchange_timestamp_ms : row.ts_ms;
         const tcell = fmtTimeExchangeMs(tms, useBj);
@@ -1880,8 +1747,6 @@
           // 单账户模式，包装成数组
           html += buildTable([{
             remark: d.remark || d.account_id || "账户",
-            template_capital_usdt: d.template_capital_usdt,
-            fixed_quote_usdt: d.fixed_quote_usdt,
             usdt_future: d.usdt_future,
             usdt_spot: d.usdt_spot
           }]);
@@ -1911,142 +1776,6 @@
       }
     }
 
-    function _trailingFormValues() {
-      const num = (id) => {
-        const v = parseFloat(document.getElementById(id).value);
-        return Number.isFinite(v) ? v : NaN;
-      };
-      const numOpt = (id) => {
-        const el = document.getElementById(id);
-        if (!el) return null;
-        const v = el.value.trim();
-        if (v === "") return null;
-        const f = parseFloat(v);
-        return Number.isFinite(f) ? f : null;
-      };
-      return {
-        priceSource: document.getElementById("trailingPriceSource")?.value || "mark",
-        monitorInterval: num("trailingMonitorInterval"),
-        idleNoPosition: num("trailingIdleNoPosition"),
-        stopLossPct: num("trailingStopLossPct"),
-        takeProfitMode: document.getElementById("trailingTakeProfitMode")?.value || "track",
-        limitOffsetBps: num("trailingTrackLimitOffsetBps"),
-        lowOffsetBps: numOpt("trailingLowOffsetBps"),
-        firstOffsetBps: numOpt("trailingFirstOffsetBps"),
-        secondOffsetBps: numOpt("trailingSecondOffsetBps"),
-        thirdOffsetBps: numOpt("trailingThirdOffsetBps"),
-        lowTrailProfit: num("trailingLowTrailProfit"),
-        lowTrailStop: num("trailingLowTrailStop"),
-        firstTrailProfit: num("trailingFirstTrailProfit"),
-        trailStopLossPct: num("trailingTrailStopLossPct"),
-        secondTrailProfit: num("trailingSecondTrailProfit"),
-        higherTrailStopPct: num("trailingHigherTrailStopPct"),
-        thirdTrailProfit: num("trailingThirdTrailProfit"),
-        thirdTrailStopPct: num("trailingThirdTrailStopPct"),
-        feishuWebhook: document.getElementById("trailingFeishuWebhook").value.trim() || "",
-        blacklist: document.getElementById("trailingBlacklist").value.trim() || "",
-      };
-    }
-    function _trailingFormApply(vals) {
-      const setVal = (id, v) => {
-        const el = document.getElementById(id);
-        if (el && v !== undefined && v !== null) el.value = v;
-      };
-      setVal("trailingPriceSource", vals.priceSource);
-      setVal("trailingMonitorInterval", vals.monitorInterval);
-      setVal("trailingIdleNoPosition", vals.idleNoPosition);
-      setVal("trailingStopLossPct", vals.stopLossPct);
-      setVal("trailingTakeProfitMode", vals.takeProfitMode);
-      setVal("trailingTrackLimitOffsetBps", vals.limitOffsetBps);
-      setVal("trailingLowOffsetBps", vals.lowOffsetBps);
-      setVal("trailingFirstOffsetBps", vals.firstOffsetBps);
-      setVal("trailingSecondOffsetBps", vals.secondOffsetBps);
-      setVal("trailingThirdOffsetBps", vals.thirdOffsetBps);
-      setVal("trailingLowTrailProfit", vals.lowTrailProfit);
-      setVal("trailingLowTrailStop", vals.lowTrailStop);
-      setVal("trailingFirstTrailProfit", vals.firstTrailProfit);
-      setVal("trailingTrailStopLossPct", vals.trailStopLossPct);
-      setVal("trailingSecondTrailProfit", vals.secondTrailProfit);
-      setVal("trailingHigherTrailStopPct", vals.higherTrailStopPct);
-      setVal("trailingThirdTrailProfit", vals.thirdTrailProfit);
-      setVal("trailingThirdTrailStopPct", vals.thirdTrailStopPct);
-      setVal("trailingFeishuWebhook", vals.feishuWebhook);
-      setVal("trailingBlacklist", vals.blacklist);
-    }
-    function _loadTrailingPresets() {
-      try {
-        const raw = localStorage.getItem(TRAIL_PRESETS_LS);
-        return raw ? JSON.parse(raw) : {};
-      } catch { return {}; }
-    }
-    function _saveTrailingPresets(presets) {
-      localStorage.setItem(TRAIL_PRESETS_LS, JSON.stringify(presets));
-    }
-    function refreshTrailingPresetDropdown() {
-      const sel = document.getElementById("trailingPresetSelect");
-      if (!sel) return;
-      const presets = _loadTrailingPresets();
-      const names = Object.keys(presets);
-      sel.innerHTML = '<option value="">— 选择预设 —</option>' +
-        names.map((n) => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join("");
-    }
-    function doSaveTrailingPreset() {
-      const nameInput = document.getElementById("trailingPresetName");
-      const name = nameInput.value.trim();
-      if (!name) { alert("请先填写预设名称"); return; }
-      const presets = _loadTrailingPresets();
-      presets[name] = _trailingFormValues();
-      _saveTrailingPresets(presets);
-      refreshTrailingPresetDropdown();
-      document.getElementById("trailingPresetSelect").value = name;
-      nameInput.value = "";
-      alert("预设「" + name + "」已保存");
-    }
-    function doLoadTrailingPreset() {
-      const sel = document.getElementById("trailingPresetSelect");
-      const name = sel.value;
-      if (!name) { alert("请先选择预设"); return; }
-      const presets = _loadTrailingPresets();
-      const vals = presets[name];
-      if (!vals) { alert("预设不存在"); return; }
-      _trailingFormApply(vals);
-      alert("已加载预设「" + name + "」");
-    }
-    function doDeleteTrailingPreset() {
-      const sel = document.getElementById("trailingPresetSelect");
-      const name = sel.value;
-      if (!name) { alert("请先选择预设"); return; }
-      if (!confirm("确定删除预设「" + name + "」？")) return;
-      const presets = _loadTrailingPresets();
-      delete presets[name];
-      _saveTrailingPresets(presets);
-      refreshTrailingPresetDropdown();
-      sel.value = "";
-      alert("预设「" + name + "」已删除");
-    }
-
-    function loadTrailingFormPrefs() {
-      const h = localStorage.getItem(TRAIL_FEISHU_LS);
-      const fe = document.getElementById("trailingFeishuWebhook");
-      if (fe && h !== null) fe.value = h;
-      const bls = localStorage.getItem(TRAIL_BLACKLIST_LS);
-      const bl = document.getElementById("trailingBlacklist");
-      if (bl && bls !== null) bl.value = bls;
-    }
-    function saveTrailingFormPrefs() {
-      const fe = document.getElementById("trailingFeishuWebhook");
-      if (fe) {
-        const v = fe.value.trim();
-        if (v) localStorage.setItem(TRAIL_FEISHU_LS, v);
-        else localStorage.removeItem(TRAIL_FEISHU_LS);
-      }
-      const bl = document.getElementById("trailingBlacklist");
-      if (bl) {
-        const v = bl.value.trim();
-        if (v) localStorage.setItem(TRAIL_BLACKLIST_LS, v);
-        else localStorage.removeItem(TRAIL_BLACKLIST_LS);
-      }
-    }
     function loadSecret() {
       const s = localStorage.getItem(KEY) || "";
       secretEl.value = s;
@@ -2054,7 +1783,6 @@
       updateButtons();
       loadAccounts();
       fetchStatus();
-      loadTrailingFormPrefs();
     }
     function saveSecret() {
       localStorage.setItem(KEY, secretEl.value.trim());
@@ -2182,16 +1910,6 @@
       if (btnSaveAccounts) btnSaveAccounts.disabled = !ok || !isAdminRole();
       if (btnAddAccount) btnAddAccount.disabled = !ok || !isAdminRole();
       if (btnReloadAccounts) btnReloadAccounts.disabled = !ok;
-      const btnSaveBot = document.getElementById("btnSaveBotSettings");
-      if (btnSaveBot) btnSaveBot.disabled = !ok || !isAdminRole();
-      const bTrStart = document.getElementById("btnTrailingStart");
-      const bTrStop = document.getElementById("btnTrailingStop");
-      if (bTrStart) bTrStart.disabled = !ok || !isAdminRole();
-      if (bTrStop) bTrStop.disabled = !ok || !isAdminRole();
-      const stopLossEnabled = document.getElementById("stopLossEnabled");
-      const stopLossPct = document.getElementById("stopLossPct");
-      if (stopLossEnabled) stopLossEnabled.disabled = !ok || !isAdminRole();
-      if (stopLossPct) stopLossPct.disabled = !ok || !isAdminRole();
       document.querySelectorAll("#accountsTableBody button[data-del]").forEach((b) => {
         b.disabled = !ok || !isAdminRole();
       });
@@ -2235,43 +1953,32 @@
         accountsState
           .filter((a) => {
             const ex = (a.exchange || "binance").toLowerCase();
-            return a.id && (ex === "binance" || ex === "okx");
+            return a.id && (ex === "binance" || ex === "okx" || ex === "gate");
           })
           .map((a) => {
             const vid = String(a.id).replace(/"/g, "&quot;");
             return `<option value="${vid}">${escHtml(a.remark || a.id)}</option>`;
           })
           .join("");
-      const trailSel = document.getElementById("accountSelectTrailing");
-      if (trailSel) {
-        const curT = trailSel.value;
-        trailSel.innerHTML = tOpts || `<option value="">无币安/OKX 账户</option>`;
-        if (curT && [...trailSel.options].some((o) => o.value === curT)) {
-          trailSel.value = curT;
-        }
-      }
       const tvWhAcc = document.getElementById("tvWebhookAccountSelect");
       if (tvWhAcc) {
         const curW = tvWhAcc.value;
         const whOpts = accountsState
           .filter((a) => {
-            if (!a.id || a.enabled === false || a.webhook_enabled === false) return false;
-            const fq = Number(a.fixed_quote_usdt) || 0;
-            const tc = Number(a.template_capital_usdt) || 0;
-            return fq > 0 || tc > 0;
+            if (!a.id || a.enabled === false) return false;
+            return true;
           })
           .map((a) => {
             const vid = String(a.id).replace(/"/g, "&quot;");
             const exn = (a.exchange || "binance").toLowerCase();
             const exLabel =
-              exn === "okx" ? "OKX" : exn === "hyperliquid" ? "HL" : "币安";
+              exn === "okx" ? "OKX" : exn === "hyperliquid" ? "HL" : exn === "gate" ? "Gate" : "币安";
             const name = (a.remark && String(a.remark).trim()) || "未命名";
             const lab = `${escHtml(name)} · ${exLabel}`;
             return `<option value="${vid}">${lab}</option>`;
           })
           .join("");
-        tvWhAcc.innerHTML =
-          `<option value="">全部账户跟单（不指定某一账户）</option>` + (whOpts || "");
+        tvWhAcc.innerHTML = (whOpts || "");
         if (curW && [...tvWhAcc.options].some((o) => o.value === curW)) {
           tvWhAcc.value = curW;
         }
@@ -2298,10 +2005,7 @@
           api_key_preview: prev.api_key_preview || "",
           has_secret: prev.has_secret || false,
           has_password: prev.has_password || false,
-          template_capital_usdt: parseFloat(g("template_capital_usdt")?.value) || 0,
-          fixed_quote_usdt: parseFloat(g("fixed_quote_usdt")?.value) || 0,
           enabled: g("enabled")?.checked !== false,
-          webhook_enabled: g("webhook_enabled")?.checked !== false,
         });
       });
       return rows;
@@ -2320,10 +2024,7 @@
         `<th>API Key</th>` +
         `<th>Secret</th>` +
         (hasOkx ? `<th>Passphrase</th>` : ``) +
-        `<th>模板本金</th>` +
-        `<th>固定USDT</th>` +
         `<th>启用</th>` +
-        `<th>Webhook</th>` +
         `<th></th>` +
         `</tr>`;
       if (accountsState.length === 0) {
@@ -2349,6 +2050,7 @@
             `<option value="binance" ${exName === "binance" ? "selected" : ""}>Binance</option>` +
             `<option value="okx" ${exName === "okx" ? "selected" : ""}>OKX</option>` +
             `<option value="hyperliquid" ${exName === "hyperliquid" ? "selected" : ""}>Hyperliquid</option>` +
+            `<option value="gate" ${exName === "gate" ? "selected" : ""}>Gate</option>` +
             `</select></td>` +
             `<td><input type="text" name="api_key" placeholder="${phK}" value="${escHtml(row.api_key || "")}" style="width:100%;min-width:6rem" autocomplete="off" /></td>` +
             `<td><input type="password" name="secret" placeholder="${phS}" value="" autocomplete="off" style="width:100%;min-width:5rem" /></td>` +
@@ -2357,10 +2059,7 @@
                   ? `<input type="password" name="password" placeholder="${phP}" value="" autocomplete="off" style="width:100%;min-width:5rem" />`
                   : `<input type="text" value="—" disabled style="width:100%;min-width:5rem;opacity:0.7" />`}</td>`
               : ``) +
-            `<td><input type="number" name="template_capital_usdt" step="0.01" min="0" value="${Number(row.template_capital_usdt) || 0}" style="width:6.5rem" /></td>` +
-            `<td><input type="number" name="fixed_quote_usdt" step="0.01" min="0" value="${Number(row.fixed_quote_usdt) || 0}" style="width:6rem" /></td>` +
             `<td><input type="checkbox" name="enabled" ${row.enabled !== false ? "checked" : ""} /></td>` +
-            `<td><input type="checkbox" name="webhook_enabled" ${row.webhook_enabled !== false ? "checked" : ""} /></td>` +
             `<td><button type="button" class="secondary" data-del="${i}" ${isAdminRole() ? "" : "disabled"}>删除</button></td>` +
             `</tr>`
           );
@@ -2435,10 +2134,7 @@
           api_key_preview: a.api_key_preview,
           has_secret: !!a.has_secret,
           has_password: !!a.has_password,
-          template_capital_usdt: Number(a.template_capital_usdt) || 0,
-          fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
-          webhook_enabled: a.webhook_enabled !== false,
         }));
         if (el) {
           el.innerHTML =
@@ -2489,10 +2185,7 @@
           api_key_preview: a.api_key_preview,
           has_secret: !!a.has_secret,
           has_password: !!a.has_password,
-          template_capital_usdt: Number(a.template_capital_usdt) || 0,
-          fixed_quote_usdt: Number(a.fixed_quote_usdt) || 0,
           enabled: a.enabled !== false,
-          webhook_enabled: a.webhook_enabled !== false,
         }));
         renderAccountsTable();
         populateAccountSelects();
@@ -2504,50 +2197,6 @@
       } finally {
         setLoading(btn, false);
       }
-    }
-
-    function updateWebhookSizingHint() {
-      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
-      const tipEl = document.getElementById("webhookSizingModeTip");
-      if (!tipEl) return;
-      if (mode === "follow_tv") {
-        tipEl.setAttribute(
-          "data-tip",
-          "和 TV 策略一样多：策略买多少币，账户就下多少币（币安）。OKX 用户按「张」跟单。记得点「保存跟单模式」。"
-        );
-      } else {
-        tipEl.setAttribute(
-          "data-tip",
-          "按各账户「模板本金 ÷ 全局模板本金」缩放 TV 数量；条件不够时用账户里设的固定 USDT 下单。"
-        );
-      }
-    }
-
-    function updateTemplateBaseFieldHint() {
-      const mode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
-      const wrap = document.getElementById("templateBaseWrap");
-      const tipEl = document.getElementById("templateBaseTip");
-      if (!wrap || !tipEl) return;
-      if (mode === "follow_tv") {
-        wrap.classList.add("template-base-dim");
-        tipEl.setAttribute(
-          "data-tip",
-          "选「跟随TV策略下单」时，这里的数字不参与计算，可以先填着不动。"
-        );
-      } else {
-        wrap.classList.remove("template-base-dim");
-        tipEl.setAttribute(
-          "data-tip",
-          "策略跑在多少 U 本金上，这里是分母。配合每个账户自己的模板本金，把 TV 数量按比例放大或缩小。"
-        );
-      }
-    }
-
-
-
-    function updateWebhookSettingsPanel() {
-      updateWebhookSizingHint();
-      updateTemplateBaseFieldHint();
     }
 
     async function fetchStatus() {
@@ -2583,11 +2232,6 @@
           dashboardRole === "admin"
             ? '<span class="pill on">主密钥（可读写）</span>'
             : '<span class="pill off">访客只读</span>';
-        const sizingModeText =
-          d.webhook_sizing_mode === "follow_tv"
-            ? "跟随TV策略下单"
-            : "跟随模板下单";
-
         const ac = typeof d.accounts_count === "number" ? d.accounts_count : "—";
         const estFeePct =
           (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0
@@ -2596,26 +2240,6 @@
         const envLine = d.env_path
           ? `<br/><span style="font-size:0.75rem;color:var(--muted)">配置路径 ${d.env_file_exists ? "✓" : "✗"}</span> <code style="font-size:0.7rem">${d.env_path}</code>`
           : "";
-        const tsList = Array.isArray(d.trailing_stop_tasks) ? d.trailing_stop_tasks : [];
-        const tsRunning = tsList.filter((x) => x && x.running);
-        let trailingLine = "";
-        if (tsRunning.length) {
-          const names = tsRunning.map((x) => {
-            const r = x.remark != null && String(x.remark).trim() ? String(x.remark).trim() : String(x.account_id || "");
-            return escHtml(r);
-          });
-          trailingLine =
-            `<br/><span>移动止盈运行中</span> <span class="pill on">${tsRunning.length} 个账户</span> ` +
-            names.join("、");
-        } else if (tsList.length) {
-          trailingLine =
-            `<br/><span>移动止盈</span> <span class="pill off">当前无运行中</span> ` +
-            `<span style="font-size:0.75rem;color:var(--muted)">（本进程内 ${tsList.length} 个账户曾有任务，已停止）</span>`;
-        } else {
-          trailingLine =
-            `<br/><span>移动止盈</span> <span class="pill off">本进程未启动</span> ` +
-            `<span style="font-size:0.75rem;color:var(--muted)">（在「移动止盈」页启动后此处显示账户名）</span>`;
-        }
         statusBox.innerHTML =
           `${net} 模式：<strong>${d.binance_type}</strong><br/>` +
           `<span>当前权限</span> ${rolePill}<br/>` +
@@ -2623,41 +2247,17 @@
           `<span>已配置 API 的账户</span> ${api}<br/>` +
           `<span>控制台密钥</span> ${dash} ${dashNote}<br/>` +
           `<span>TV Webhook 密钥</span> ${wh}<br/>` +
-          `<span>Webhook 模式</span> ${escHtml(sizingModeText)}<br/>` +
-          `${trailingLine}<br/>` +
-          `<span>全局模板本金</span> ${Number(d.template_base_capital_usdt) || 0} USDT<br/>` +
-          `<span>默认 USDT（迁移/参考）</span> ${d.default_quote_amount}<br/>` +
+          `<span>默认 USDT</span> ${d.default_quote_amount}<br/>` +
           `<span>交易记录估算手续费率</span> ${estFeePct.toFixed(4)}% <span style="font-size:0.75rem;color:var(--muted)">（.env DISPLAY_EST_FEE_RATE）</span>` +
           envLine;
         updateButtons();
         if (typeof d.display_est_fee_rate === "number" && d.display_est_fee_rate >= 0 && d.display_est_fee_rate <= 0.05) {
           displayEstFeeRate = d.display_est_fee_rate;
         }
-        const sle = document.getElementById("stopLossEnabled");
-        if (sle && typeof d.stop_loss_enabled === "boolean") {
-          sle.checked = d.stop_loss_enabled;
-        }
-        const slp = document.getElementById("stopLossPct");
-        if (slp && d.stop_loss_pct != null && !Number.isNaN(Number(d.stop_loss_pct))) {
-          slp.value = String(d.stop_loss_pct);
-        }
-        const sizingModeEl = document.getElementById("webhookSizingMode");
-        if (sizingModeEl && d.webhook_sizing_mode) {
-          sizingModeEl.value = String(d.webhook_sizing_mode);
-        }
         const openOnlyEl = document.getElementById("webhookOpenOnly");
         if (openOnlyEl && typeof d.webhook_open_only === "boolean") {
           openOnlyEl.checked = d.webhook_open_only;
         }
-        const templateBaseEl = document.getElementById("templateBaseCapitalUsdt");
-        if (
-          templateBaseEl &&
-          d.template_base_capital_usdt != null &&
-          !Number.isNaN(Number(d.template_base_capital_usdt))
-        ) {
-          templateBaseEl.value = String(d.template_base_capital_usdt);
-        }
-        updateWebhookSettingsPanel();
         applyWebhookUrlFromStatus(d);
       } catch (e) {
         dashboardRole = null;
@@ -2669,57 +2269,18 @@
     }
 
     async function saveBotSettings() {
-      if (!getSecret()) {
-        alert("请先填写并保存访问密钥");
-        return;
-      }
+      if (!getSecret()) return;
       if (!ensureAdminAction()) return;
-      const btn = document.getElementById("btnSaveBotSettings");
-      setLoading(btn, true, { loading: "保存中…" });
       try {
-      const pctRaw = document.getElementById("stopLossPct")?.value;
-      const pct = parseFloat(pctRaw);
-      const templateBaseRaw = document.getElementById("templateBaseCapitalUsdt")?.value;
-      const templateBase = parseFloat(templateBaseRaw);
-      const sizingMode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
-      if (!Number.isFinite(pct) || pct <= 0 || pct > 50) {
-        alert("止损幅度须在 0～50% 之间（不含 0）");
-        setLoading(btn, false);
-        return;
-      }
-      if (!Number.isFinite(templateBase) || templateBase < 0) {
-        alert("模板本金不能小于 0");
-        setLoading(btn, false);
-        return;
-      }
-        const r = await fetch("/api/bot-settings", {
+        await fetch("/api/bot-settings", {
           method: "PUT",
           headers: authHeaders(),
           body: JSON.stringify({
-            stop_loss_enabled: !!document.getElementById("stopLossEnabled")?.checked,
-            stop_loss_pct: pct,
-            webhook_sizing_mode: sizingMode,
-            template_base_capital_usdt: templateBase,
             webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
           }),
         });
-        const t = await r.text();
-        let d;
-        try {
-          d = JSON.parse(t);
-        } catch {
-          d = {};
-        }
-        if (!r.ok || !d.ok) {
-          alert(d.error || t || "保存失败");
-          return;
-        }
-        alert("机器人设置已保存");
-        await fetchStatus();
       } catch (e) {
-        alert(String(e));
-      } finally {
-        setLoading(btn, false);
+        // 静默保存，忽略错误
       }
     }
 
@@ -2792,25 +2353,16 @@
         exchange: "binance",
         api_key: "",
         secret: "",
-        template_capital_usdt: 1000,
-        fixed_quote_usdt: 500,
         enabled: true,
-        webhook_enabled: true,
       });
       renderAccountsTable();
       populateAccountSelects();
     }
     if (btnAddAccount) btnAddAccount.addEventListener("click", addAccountRow);
     if (btnSaveAccounts) btnSaveAccounts.addEventListener("click", saveAccounts);
-    const btnSaveBotSettings = document.getElementById("btnSaveBotSettings");
-    if (btnSaveBotSettings) btnSaveBotSettings.addEventListener("click", saveBotSettings);
     if (btnReloadAccounts) btnReloadAccounts.addEventListener("click", loadAccounts);
     secretEl.addEventListener("input", updateButtons);
     if (btnRefreshAccount) btnRefreshAccount.addEventListener("click", doAccRefresh);
-    const webhookSizingModeEl = document.getElementById("webhookSizingMode");
-    if (webhookSizingModeEl) {
-      webhookSizingModeEl.addEventListener("change", updateWebhookSettingsPanel);
-    }
     const accountSelectAccountEl = document.getElementById("accountSelectAccount");
     if (accountSelectAccountEl) {
       accountSelectAccountEl.addEventListener("change", () => {
@@ -2821,6 +2373,10 @@
       accBtnToggleRawJson.addEventListener("click", () => {
         setAccBalanceRawJsonVisible(!accBalanceRawVisible);
       });
+    }
+    const webhookOpenOnlyEl = document.getElementById("webhookOpenOnly");
+    if (webhookOpenOnlyEl) {
+      webhookOpenOnlyEl.addEventListener("change", () => saveBotSettings());
     }
 
     async function doWebhookTest() {
@@ -3007,43 +2563,7 @@
       }
     }
 
-    async function tvWizardSaveFollow() {
-      if (!getSecret()) {
-        alert("请先填写并保存访问密钥");
-        return;
-      }
-      if (!ensureAdminAction()) return;
-      const sizingMode = document.getElementById("webhookSizingMode")?.value || "template_or_fixed";
-      const openOnly = !!document.getElementById("webhookOpenOnly")?.checked;
-      try {
-        const r = await fetch("/api/bot-settings", {
-          method: "PUT",
-          headers: authHeaders(),
-          body: JSON.stringify({
-            webhook_sizing_mode: sizingMode,
-            webhook_open_only: openOnly,
-          }),
-        });
-        const t = await r.text();
-        let d;
-        try {
-          d = JSON.parse(t);
-        } catch {
-          d = {};
-        }
-        if (!r.ok || !d.ok) {
-          alert(d.error || t || "保存失败");
-          return;
-        }
-        alert("跟单模式已保存（与概览里其他设置互不覆盖）");
-        await fetchStatus();
-      } catch (e) {
-        alert(String(e));
-      }
-    }
-
     document.getElementById("btnTvWizardGenerate")?.addEventListener("click", tvWizardGenerate);
-    document.getElementById("btnTvWizardSaveFollow")?.addEventListener("click", tvWizardSaveFollow);
     document.getElementById("btnTvWizardCopyOutput")?.addEventListener("click", async () => {
       const el = document.getElementById("tvWizardOutput");
       const b = document.getElementById("btnTvWizardCopyOutput");
@@ -3131,211 +2651,11 @@
       }
     });
 
-    async function refreshTrailingStatus() {
-      const box = document.getElementById("trailingRunStat");
-      const topHint = document.getElementById("trailingHintTop");
-      const sel = document.getElementById("accountSelectTrailing");
-      if (!box || !sel) return;
-      if (!getSecret()) {
-        box.textContent = "—";
-        if (topHint) topHint.textContent = "请先在「概览」保存访问密钥。";
-        return;
-      }
-      if (topHint) topHint.textContent = "";
-      try {
-        const r = await fetch("/api/trailing-stop/status", { headers: authHeaders() });
-        const d = await r.json();
-        if (!d.ok) throw new Error(d.error || JSON.stringify(d));
-        const tasks = d.tasks || [];
-        const id = sel.value;
-        const cur = id ? tasks.find((t) => String(t.account_id) === id) : null;
-        if (!id) {
-          box.textContent = "请选择账户。";
-          return;
-        }
-        if (!cur) {
-          box.textContent = "当前账户未运行移动止盈。";
-          return;
-        }
-        const run = cur.running ? "运行中" : "已停止";
-        const p = cur.params || {};
-        const px =
-          p.use_last_price && p.use_last_price_only
-            ? "仅最新价"
-            : p.use_last_price
-              ? "最新价(保守)"
-              : "标记价";
-        const tpm = p.take_profit_mode;
-        const eat = p.exchange_algo_type || "stop_market";
-        let cm = "市价";
-        if (tpm === "track" || p.trailing_exec === "exchange_stop") {
-          cm = eat === "stop_limit" ? "条件限价(STOP)" : "条件市价(STOP_MARKET)";
-        } else if (
-          tpm === "limit_ioc" ||
-          p.close_mode === "limit_ioc" ||
-          p.close_mode === "limit"
-        ) {
-          cm = "限价IOC";
-        }
-        box.textContent =
-          `状态: ${run}\n` +
-          `开始: ${cur.started_at || "—"}\n` +
-          (cur.stopped_at ? `结束: ${cur.stopped_at}\n` : "") +
-          `计价: ${px} · 平仓: ${cm} · 有仓=${p.monitor_interval ?? "—"}s · 空仓=${p.idle_no_position_sec ?? "—"}s\n` +
-          `止损=${p.stop_loss_pct ?? "—"}%\n` +
-          `最近: ${cur.last_status || "—"}`;
-      } catch (e) {
-        box.textContent = "查询失败: " + e.message;
-      }
-    }
-
-    async function doTrailingStart() {
-      const btn = document.getElementById("btnTrailingStart");
-      const hint = document.getElementById("trailingFormHint");
-      if (hint) hint.textContent = "";
-      if (!ensureAdminAction()) return;
-      const sel = document.getElementById("accountSelectTrailing");
-      const account_id = sel && sel.value;
-      if (!account_id) {
-        alert("请选择账户");
-        return;
-      }
-      setLoading(btn, true, { loading: "启动中…" });
-      const num = (id) => {
-        const v = parseFloat(document.getElementById(id).value);
-        return Number.isFinite(v) ? v : NaN;
-      };
-      const _ps = document.getElementById("trailingPriceSource")?.value || "mark";
-      const numOpt = (id) => {
-        const el = document.getElementById(id);
-        if (!el) return null;
-        const v = el.value.trim();
-        if (v === "") return null;
-        const f = parseFloat(v);
-        return Number.isFinite(f) ? f : null;
-      };
-      const body = {
-        secret: getSecret(),
-        account_id,
-        use_last_price: _ps === "last" || _ps === "last_only",
-        use_last_price_only: _ps === "last_only",
-        take_profit_mode:
-          document.getElementById("trailingTakeProfitMode")?.value || "track",
-        limit_offset_bps: num("trailingTrackLimitOffsetBps"),
-        low_offset_bps: numOpt("trailingLowOffsetBps"),
-        first_offset_bps: numOpt("trailingFirstOffsetBps"),
-        second_offset_bps: numOpt("trailingSecondOffsetBps"),
-        third_offset_bps: numOpt("trailingThirdOffsetBps"),
-        idle_no_position_sec: num("trailingIdleNoPosition"),
-        monitor_interval: num("trailingMonitorInterval"),
-        stop_loss_pct: num("trailingStopLossPct"),
-        low_trail_stop_loss_pct: num("trailingLowTrailStop"),
-        trail_stop_loss_pct: num("trailingTrailStopLossPct"),
-        higher_trail_stop_loss_pct: num("trailingHigherTrailStopPct"),
-        third_trail_stop_loss_pct: num("trailingThirdTrailStopPct"),
-        low_trail_profit_threshold: num("trailingLowTrailProfit"),
-        first_trail_profit_threshold: num("trailingFirstTrailProfit"),
-        second_trail_profit_threshold: num("trailingSecondTrailProfit"),
-        third_trail_profit_threshold: num("trailingThirdTrailProfit"),
-        feishu_webhook: document.getElementById("trailingFeishuWebhook").value.trim() || null,
-        blacklist: document.getElementById("trailingBlacklist").value.trim() || null,
-      };
-      for (const k of Object.keys(body)) {
-        if (
-          k === "secret" ||
-          k === "account_id" ||
-          k === "feishu_webhook" ||
-          k === "blacklist" ||
-          k === "use_last_price" ||
-          k === "use_last_price_only" ||
-          k === "take_profit_mode"
-        )
-          continue;
-        if (typeof body[k] === "number" && !Number.isFinite(body[k])) {
-          if (hint) hint.textContent = "请填写有效的数字参数";
-          setLoading(btn, false);
-          return;
-        }
-      }
-      if (
-        !Number.isFinite(body.limit_offset_bps) ||
-        body.limit_offset_bps < 0 ||
-        body.limit_offset_bps > 500
-      ) {
-        if (hint) hint.textContent = "触发→委托价差基点须在 0～500（追踪模式为限价相对触发价的偏移）";
-        setLoading(btn, false);
-        return;
-      }
-      if (
-        body.trail_stop_loss_pct <= 0 || body.trail_stop_loss_pct > 1 ||
-        body.higher_trail_stop_loss_pct <= 0 || body.higher_trail_stop_loss_pct > 1 ||
-        body.third_trail_stop_loss_pct <= 0 || body.third_trail_stop_loss_pct > 1
-      ) {
-        if (hint) hint.textContent = "三档回撤比例须在 0～1 之间（如 0.3）";
-        setLoading(btn, false);
-        return;
-      }
-      if (body.idle_no_position_sec < 5 || body.idle_no_position_sec > 120) {
-        if (hint) hint.textContent = "无持仓轮询间隔须在 5～120 秒之间";
-        setLoading(btn, false);
-        return;
-      }
-      try {
-        const r = await fetch("/api/trailing-stop/start", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify(body),
-        });
-        const d = await r.json();
-        if (!d.ok) throw new Error(d.error || d.hint || JSON.stringify(d));
-        if (hint) hint.textContent = "已启动";
-        saveTrailingFormPrefs();
-        refreshTrailingStatus();
-      } catch (e) {
-        if (hint) hint.textContent = "启动失败: " + e.message;
-      } finally {
-        setLoading(btn, false);
-      }
-    }
-
-    async function doTrailingStop() {
-      const btn = document.getElementById("btnTrailingStop");
-      const hint = document.getElementById("trailingFormHint");
-      if (hint) hint.textContent = "";
-      if (!ensureAdminAction()) return;
-      const sel = document.getElementById("accountSelectTrailing");
-      const account_id = sel && sel.value;
-      if (!account_id) {
-        alert("请选择账户");
-        return;
-      }
-      setLoading(btn, true, { loading: "停止中…" });
-      try {
-        const r = await fetch("/api/trailing-stop/stop", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({ secret: getSecret(), account_id }),
-        });
-        const d = await r.json();
-        if (!d.ok) throw new Error(d.error || JSON.stringify(d));
-        if (hint) hint.textContent = "已停止";
-        refreshTrailingStatus();
-      } catch (e) {
-        if (hint) hint.textContent = "停止失败: " + e.message;
-      } finally {
-        setLoading(btn, false);
-      }
-    }
-
     function initTabs() {
       document.querySelectorAll(".tab-btn").forEach((btn) => {
         btn.addEventListener("click", () => {
           const name = btn.getAttribute("data-tab");
           if (!name) return;
-          if (trailingPollTimer) {
-            clearInterval(trailingPollTimer);
-            trailingPollTimer = null;
-          }
           document.querySelectorAll(".tab-btn").forEach((b) => {
             const on = b === btn;
             b.classList.toggle("active", on);
@@ -3351,29 +2671,23 @@
           if (name === "account" && getSecret()) {
             doAccRefresh().catch(() => {});
           }
-          if (name === "trailing") {
-            refreshTrailingStatus();
-            trailingPollTimer = setInterval(refreshTrailingStatus, 2500);
-          }
           if (name === "signallog") {
             loadSignalLog();
+          }
+          if (name === "tpsl") {
+            populateTpslAccountSelect();
+            loadTpslConfig().then(() => refreshTpslStatus());
+            startTpslPolling();
+          } else {
+            stopTpslPolling();
           }
         });
       });
     }
     initTabs();
 
-    document.getElementById("btnTrailingStart")?.addEventListener("click", doTrailingStart);
-    document.getElementById("btnTrailingStop")?.addEventListener("click", doTrailingStop);
-    document.getElementById("accountSelectTrailing")?.addEventListener("change", refreshTrailingStatus);
-    document.getElementById("trailingFeishuWebhook")?.addEventListener("blur", saveTrailingFormPrefs);
-    document.getElementById("trailingBlacklist")?.addEventListener("blur", saveTrailingFormPrefs);
     document.getElementById("btnSignalLogRefresh")?.addEventListener("click", loadSignalLog);
     document.getElementById("btnSignalLogClear")?.addEventListener("click", clearSignalLog);
-    document.getElementById("btnTrailingPresetSave")?.addEventListener("click", doSaveTrailingPreset);
-    document.getElementById("btnTrailingPresetLoad")?.addEventListener("click", doLoadTrailingPreset);
-    document.getElementById("btnTrailingPresetDelete")?.addEventListener("click", doDeleteTrailingPreset);
-    refreshTrailingPresetDropdown();
     document.querySelectorAll(".help-tip").forEach((el) => {
       el.addEventListener("click", (e) => {
         if (window.matchMedia("(hover: none)").matches) {
@@ -3392,6 +2706,198 @@
         doAccRefresh().catch(() => {});
       }
     }
+
+    // ---------- TP/SL 止盈止损 ----------
+    let _tpslPollTimer = null;
+
+    function populateTpslAccountSelect() {
+      const sel = document.getElementById("tpslAccountSelect");
+      if (!sel) return;
+      const cur = sel.value || "";
+      sel.innerHTML = "";
+      (accountsState || []).forEach((a) => {
+        if (!a.enabled) return;
+        const label = (a.remark || a.id || "").trim();
+        const exLabel =
+          a.exchange === "binance" ? "Binance" :
+          a.exchange === "okx" ? "OKX" :
+          a.exchange === "hyperliquid" ? "HL" :
+          a.exchange === "gate" ? "Gate" : (a.exchange || "");
+        const text = (label ? (label + " (" + exLabel + ")") : (a.id || "")).slice(0, 64);
+        const opt = document.createElement("option");
+        opt.value = a.id;
+        opt.textContent = text;
+        sel.appendChild(opt);
+      });
+      if (cur) {
+        const exists = Array.from(sel.options).some((o) => o.value === cur);
+        if (exists) sel.value = cur;
+      }
+    }
+
+    async function loadTpslConfig() {
+      if (!getSecret()) return;
+      try {
+        const r = await fetch("/api/tp-sl/config", { headers: { "X-TV-Secret": getSecret() } });
+        const d = await r.json();
+        if (!d.ok) return;
+        const el = (id) => document.getElementById(id);
+        const setVal = (id, val) => { const e = el(id); if (e) e.value = val; };
+        const setChk = (id, val) => { const e = el(id); if (e) e.checked = !!val; };
+        setVal("tpslAccountSelect", d.account_id || "");
+        setVal("tpslSymbol", d.symbol || "ETH/USDT");
+        setVal("tpslTpPoints", d.tp_points ?? 20);
+        setVal("tpslSlPoints", d.sl_points ?? 50);
+        setVal("tpslBeTrigger", d.breakeven_trigger_points ?? 30);
+        setVal("tpslBeDrawdown", d.breakeven_drawdown_points ?? 10);
+        setChk("tpslUseLimit", d.use_limit_orders !== false);
+      } catch (e) { /* ignore */ }
+    }
+
+    async function saveTpslConfig() {
+      if (!getSecret()) { alert("请先填写访问密钥"); return; }
+      if (!ensureAdminAction()) return;
+      const el = (id) => document.getElementById(id);
+      const body = {
+        account_id: (el("tpslAccountSelect")?.value || "").trim(),
+        symbol: (el("tpslSymbol")?.value || "").trim() || "ETH/USDT",
+        tp_points: parseFloat(el("tpslTpPoints")?.value) || 0,
+        sl_points: parseFloat(el("tpslSlPoints")?.value) || 0,
+        breakeven_trigger_points: parseFloat(el("tpslBeTrigger")?.value) || 0,
+        breakeven_drawdown_points: parseFloat(el("tpslBeDrawdown")?.value) || 0,
+        use_limit_orders: !!el("tpslUseLimit")?.checked,
+      };
+      try {
+        const r = await fetch("/api/tp-sl/config", {
+          method: "PUT", headers: authHeaders(), body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        const hint = document.getElementById("tpslHint");
+        if (d.ok) {
+          if (hint) { hint.textContent = "配置已保存"; hint.style.color = "var(--ok)"; }
+        } else {
+          if (hint) { hint.textContent = d.error || "保存失败"; hint.style.color = "var(--err)"; }
+        }
+      } catch (e) {
+        const hint = document.getElementById("tpslHint");
+        if (hint) { hint.textContent = "保存异常: " + (e.message || e); hint.style.color = "var(--err)"; }
+      }
+    }
+
+    async function startTpslMonitor() {
+      if (!getSecret()) { alert("请先填写访问密钥"); return; }
+      if (!ensureAdminAction()) return;
+      await saveTpslConfig();
+      try {
+        const r = await fetch("/api/tp-sl/start", { method: "POST", headers: authHeaders() });
+        const d = await r.json();
+        const hint = document.getElementById("tpslHint");
+        if (d.ok) {
+          if (hint) { hint.textContent = "监控已启动"; hint.style.color = "var(--ok)"; }
+          refreshTpslStatus();
+          startTpslPolling();
+        } else {
+          if (hint) { hint.textContent = d.error || "启动失败"; hint.style.color = "var(--err)"; }
+        }
+      } catch (e) {
+        const hint = document.getElementById("tpslHint");
+        if (hint) { hint.textContent = "启动异常: " + (e.message || e); hint.style.color = "var(--err)"; }
+      }
+    }
+
+    async function stopTpslMonitor() {
+      if (!getSecret()) return;
+      if (!ensureAdminAction()) return;
+      stopTpslPolling();
+      try {
+        const r = await fetch("/api/tp-sl/stop", { method: "POST", headers: authHeaders() });
+        const d = await r.json();
+        const hint = document.getElementById("tpslHint");
+        if (d.ok) {
+          if (hint) { hint.textContent = "监控已停止"; hint.style.color = "var(--warning, #e6a817)"; }
+          refreshTpslStatus();
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    function stateLabel(s) {
+      if (s === "breakeven") return "保本中";
+      if (s === "monitoring") return "监控中";
+      if (s === "idle") return "空闲";
+      return s || "-";
+    }
+    function sideLabel(s) { return s === "long" ? "多" : s === "short" ? "空" : "-"; }
+    function fmt4(v) { return v != null ? Number(v).toFixed(4) : "-"; }
+
+    async function refreshTpslStatus() {
+      if (!getSecret()) return;
+      try {
+        const r = await fetch("/api/tp-sl/status", { headers: { "X-TV-Secret": getSecret() } });
+        const d = await r.json();
+        if (!d.ok) return;
+        const s = d.status || {};
+        const overall = document.getElementById("tpslOverallState");
+        if (overall) overall.textContent = s.running ? "运行中" : "未启动";
+
+        const symbols = s.symbols || {};
+        const symNames = Object.keys(symbols);
+        const table = document.getElementById("tpslSymbolsTable");
+        const tbody = document.getElementById("tpslSymbolsBody");
+        const noData = document.getElementById("tpslNoSymbols");
+
+        if (symNames.length === 0) {
+          if (table) table.style.display = "none";
+          if (noData) noData.style.display = "";
+        } else {
+          if (table) table.style.display = "";
+          if (noData) noData.style.display = "none";
+          if (tbody) {
+            tbody.innerHTML = symNames.map((sym) => {
+              const sd = symbols[sym] || {};
+              const pos = sd.position || {};
+              const tpOrd = (sd.orders || []).find((o) => o.type === "limit");
+              const slOrd = (sd.orders || []).find((o) => o.type && o.type.includes("stop"));
+              return '<tr style="border-bottom:1px solid var(--border);">' +
+                '<td style="padding:0.3rem 0.2rem; font-weight:500;">' + sym + '</td>' +
+                '<td style="text-align:center; padding:0.3rem 0.2rem;">' + sideLabel(pos.side) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(pos.size) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(pos.entry_price) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(pos.mark_price) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(sd.peak_price) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(sd.tp_price) + '</td>' +
+                '<td style="text-align:right; padding:0.3rem 0.2rem;">' + fmt4(sd.sl_price) + '</td>' +
+                '<td style="text-align:center; padding:0.3rem 0.2rem;">' + (sd.be_activated ? "是" : "否") + '</td>' +
+                '<td style="text-align:center; padding:0.3rem 0.2rem;">' + stateLabel(sd.state) + '</td>' +
+                '</tr>';
+            }).join("");
+          }
+        }
+
+        const errEl = document.getElementById("tpslLastError");
+        if (errEl) {
+          if (s.last_error) { errEl.style.display = ""; errEl.textContent = "最近错误: " + s.last_error; }
+          else { errEl.style.display = "none"; }
+        }
+        const btnStart = document.getElementById("btnTpslStart");
+        const btnStop = document.getElementById("btnTpslStop");
+        if (btnStart) btnStart.disabled = !!s.running;
+        if (btnStop) btnStop.disabled = !s.running;
+      } catch (e) { /* ignore */ }
+    }
+
+    function startTpslPolling() {
+      stopTpslPolling();
+      _tpslPollTimer = setInterval(refreshTpslStatus, 3000);
+    }
+
+    function stopTpslPolling() {
+      if (_tpslPollTimer) { clearInterval(_tpslPollTimer); _tpslPollTimer = null; }
+    }
+
+    // Event listeners
+    document.getElementById("btnTpslSave")?.addEventListener("click", saveTpslConfig);
+    document.getElementById("btnTpslStart")?.addEventListener("click", startTpslMonitor);
+    document.getElementById("btnTpslStop")?.addEventListener("click", stopTpslMonitor);
 
     loadSecret();
     fetchStatus();
