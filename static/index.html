@@ -877,6 +877,24 @@
             <span class="label-text">仅开仓</span>
             <span class="help-tip" id="webhookOpenOnlyTip" tabindex="0" data-tip="勾选后，TV 发来的纯平仓/减仓信号会被忽略；开仓、加仓、反手仍会下单。生成 JSON 时会自动带上 open_only: true。">?</span>
           </label>
+          <label class="sl-check label-with-tip" style="display:flex;align-items:center;gap:0.45rem;cursor:pointer;flex-wrap:wrap;margin-top:0.4rem;">
+            <input type="checkbox" id="webhookAllowReversal" onchange="tvWizardGenerate()" />
+            <span class="label-text">允许反手</span>
+            <span class="help-tip" tabindex="0" data-tip="勾选后，一键生成的模板含 prev_market_position / market_position 字段，TV 反手信号会平仓再反向开仓。不勾选则模板不含这些字段，平仓完全交给机器人 TP/SL。">?</span>
+          </label>
+        </div>
+        <div class="field-stack" style="margin-top: 0.65rem;">
+          <span class="label-text" style="margin-bottom:0.3rem;display:block;">每周暂停日</span>
+          <div id="webhookPauseDays" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="0" onchange="saveBotSettings()" /> 一</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="1" onchange="saveBotSettings()" /> 二</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="2" onchange="saveBotSettings()" /> 三</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="3" onchange="saveBotSettings()" /> 四</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="4" onchange="saveBotSettings()" /> 五</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="5" onchange="saveBotSettings()" /> 六</label>
+            <label class="sl-check" style="cursor:pointer;"><input type="checkbox" value="6" onchange="saveBotSettings()" /> 日</label>
+          </div>
+          <span class="help-tip" tabindex="0" data-tip="勾选的日子不会接收 TV 信号（Webhook 直接返回已跳过）。周一=0，周日=6。不勾选则每天接收。" style="margin-top:0.2rem;display:inline-block;">?</span>
         </div>
         <div class="row" style="margin-top: 0.75rem; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
           <button type="button" class="secondary" id="btnTvWizardGenerate">一键生成告警模板</button>
@@ -884,7 +902,7 @@
         </div>
         <label for="tvWizardOutput" class="label-with-tip" style="margin-top: 0.75rem; display:flex;">
           <span class="label-text">生成结果</span>
-          <span class="help-tip" tabindex="0" data-tip="quote_amount 为 USDT 名义金额（如 100 表示 100 USDT）。模板里还需 prev_market_position、market_position，机器人才能识别平仓跳过与反手。可将 {{strategy.order.contracts}} 替换为固定数值或 Pine 中代表 USDT 的变量。">?</span>
+          <span class="help-tip" tabindex="0" data-tip="quote_amount 为 USDT 名义金额（如 100 表示 100 USDT）。仅开仓模式下不含 market_position 字段，平仓交给机器人 TP/SL；关闭仅开仓后模板会自动包含 prev_market_position、market_position 用于反手判断。可将 {{strategy.order.contracts}} 替换为固定数值或 Pine 中代表 USDT 的变量。">?</span>
         </label>
         <p class="hint" id="tvWizardGenerateHint" style="margin-top: 0.35rem; font-size: 0.78rem; min-height: 1.1em;"></p>
         <textarea id="tvWizardOutput" style="min-height: 220px; font-size: 0.78rem; margin-top: 0.35rem;" placeholder="点「一键生成」后 JSON 会出现在这里…"></textarea>
@@ -1066,8 +1084,8 @@
     const accBtnToggleRawJson = document.getElementById("accBtnToggleRawJson");
     let accBalanceRawVisible = false;
 
-    /** TradingView 告警 JSON 骨架（币安：contracts/amount 均为标的币数量；OKX：contracts 为张） */
-    const TV_TPL_WEBHOOK_BASE = `{
+    /** 完整模板：含 market_position，用于允许反手 */
+    const TV_TPL_WEBHOOK_FULL = `{
   "ticker": "{{ticker}}",
   "action": "{{strategy.order.action}}",
   "symbol": "{{ticker}}",
@@ -1076,7 +1094,15 @@
   "position_size": "{{strategy.position_size}}",
   "quote_amount": "{{strategy.order.contracts}}"
 }`;
-    const TV_TPL_WEBHOOK_FOLLOW_TV = TV_TPL_WEBHOOK_BASE;
+    /** 简洁模板：不含 market_position，平仓靠机器人 TP/SL */
+    const TV_TPL_WEBHOOK_SIMPLE = `{
+  "ticker": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "symbol": "{{ticker}}",
+  "quote_amount": "{{strategy.order.contracts}}"
+}`;
+    const TV_TPL_WEBHOOK_BASE = TV_TPL_WEBHOOK_FULL;
+    const TV_TPL_WEBHOOK_FOLLOW_TV = TV_TPL_WEBHOOK_FULL;
 
     function fmtU(n) {
       if (n === null || n === undefined || typeof n === "object") return "—";
@@ -2258,6 +2284,13 @@
         if (openOnlyEl && typeof d.webhook_open_only === "boolean") {
           openOnlyEl.checked = d.webhook_open_only;
         }
+        // 暂停日
+        if (d.webhook_pause_days && Array.isArray(d.webhook_pause_days)) {
+          const checks = document.querySelectorAll("#webhookPauseDays input[type=checkbox]");
+          checks.forEach(cb => {
+            cb.checked = d.webhook_pause_days.includes(parseInt(cb.value));
+          });
+        }
         applyWebhookUrlFromStatus(d);
       } catch (e) {
         dashboardRole = null;
@@ -2272,11 +2305,14 @@
       if (!getSecret()) return;
       if (!ensureAdminAction()) return;
       try {
+        const pauseChecks = document.querySelectorAll("#webhookPauseDays input[type=checkbox]:checked");
+        const pauseDays = Array.from(pauseChecks).map(cb => parseInt(cb.value));
         await fetch("/api/bot-settings", {
           method: "PUT",
           headers: authHeaders(),
           body: JSON.stringify({
             webhook_open_only: !!document.getElementById("webhookOpenOnly")?.checked,
+            webhook_pause_days: pauseDays,
           }),
         });
       } catch (e) {
@@ -2547,7 +2583,9 @@
       if (!out) return;
       const accId = document.getElementById("tvWebhookAccountSelect")?.value?.trim() || "";
       const openOnly = document.getElementById("webhookOpenOnly")?.checked || false;
-      let s = TV_TPL_WEBHOOK_BASE.trim();
+      const allowReversal = document.getElementById("webhookAllowReversal")?.checked || false;
+      const tpl = allowReversal ? TV_TPL_WEBHOOK_FULL : TV_TPL_WEBHOOK_SIMPLE;
+      let s = tpl.trim();
       const parts = [];
       if (accId) parts.push(`  "account_id": ${JSON.stringify(accId)}`);
       if (openOnly) parts.push(`  "open_only": true`);
@@ -2559,6 +2597,8 @@
         const bits = ["已生成，可复制到 TV"];
         bits.push(accId ? "仅所选账户" : "全部 Webhook 账户");
         if (openOnly) bits.push("已含仅开仓");
+        if (allowReversal) bits.push("含反手字段");
+        else bits.push("不含 market_position（平仓靠 TP/SL）");
         hintEl.textContent = bits.join(" · ");
       }
     }
