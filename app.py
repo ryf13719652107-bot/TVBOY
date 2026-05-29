@@ -1155,9 +1155,9 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
 
 def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
     """根据市场精度手动取整 amount，兼容 DECIMAL_PLACES 和 TICK_SIZE 两种精度模式。
-    Gate 使用 TICK_SIZE 模式（precision.amount=1 表示步长为1，即整数）；
-    ccxt 的 amount_to_precision 在取整后为 0 时会抛 InvalidOrder，
-    而 create_order 内部也会再调一次，所以必须提前手动取整。"""
+    Gate 使用 TICK_SIZE 模式，但 ccxt 报告的 precision.amount 可能偏大
+    （如 ETH/USDT:USDT 报告 1，实际步长 0.1），
+    此时用 limits.amount.min 校正步长。"""
     if not isinstance(mkt, dict):
         return float(int(amount)) if amount >= 1 else amount
     prec = mkt.get("precision", {})
@@ -1166,6 +1166,9 @@ def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
         return float(int(amount)) if amount >= 1 else amount
     tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
     if tick_size >= 1:
+        min_amt = float((mkt.get("limits") or {}).get("amount", {}).get("min") or 0)
+        if 0 < min_amt < tick_size:
+            tick_size = min_amt
         return float(math.floor(float(amount) / tick_size) * tick_size)
     elif tick_size > 0:
         factor = 10.0 ** round(-math.log10(tick_size))
@@ -1174,7 +1177,7 @@ def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
 
 
 def _get_min_contracts(exchange, mkt: dict | None) -> float:
-    """获取交易所最小合约张数。OKX/Gate 合约张数须按市场精度取整（多数为整数）。"""
+    """获取交易所最小合约张数。OKX 必须整张(≥1)；Gate 按市场 limits.amount.min。"""
     _raw = None
     if isinstance(mkt, dict):
         _raw = mkt.get("limits", {}).get("amount", {}).get("min")
@@ -1185,7 +1188,7 @@ def _get_min_contracts(exchange, mkt: dict | None) -> float:
     if _exchange_id(exchange) == "okx":
         return max(1.0, float(int(min_val)))
     if _exchange_id(exchange) == "gate":
-        return max(1.0, float(int(min_val)))
+        return min_val if min_val > 0 else 1.0
     return max(min_val, 0.0) if min_val > 0 else 1.0
 
 
@@ -1533,6 +1536,50 @@ def start_preload_trade_markets_in_background() -> None:
     ).start()
 
 
+def _gate_fix_precision(exchange) -> None:
+    """修正 Gate 合约市场 ccxt 报告的 precision.amount。
+    ccxt 对 Gate 合约的 precision.amount 使用 TICK_SIZE 模式，但部分合约报告的值偏大
+    （如 ETH/USDT:USDT 报告 1，实际步长为 0.1）。
+    此函数在 markets 加载后，用 limits.amount.min 校正 precision.amount，
+    使 ccxt 内部的 amount_to_precision 能正确取整。"""
+    try:
+        exchange.load_markets()
+    except Exception:
+        return
+    if not getattr(exchange, "markets", None):
+        return
+    fixed = 0
+    for symbol, mkt in exchange.markets.items():
+        if not isinstance(mkt, dict) or not mkt.get("swap"):
+            continue
+        prec = mkt.get("precision")
+        if not isinstance(prec, dict):
+            continue
+        amount_prec = prec.get("amount")
+        limits = mkt.get("limits")
+        if not isinstance(limits, dict):
+            continue
+        amount_limits = limits.get("amount")
+        if not isinstance(amount_limits, dict):
+            continue
+        min_amount = amount_limits.get("min")
+        if min_amount is None:
+            continue
+        min_amount = float(min_amount)
+        if min_amount <= 0:
+            continue
+        if amount_prec is not None and float(amount_prec) > min_amount:
+            old_prec = prec["amount"]
+            prec["amount"] = min_amount
+            fixed += 1
+            logger.debug(
+                "[Gate精度修正] %s precision.amount %s → %s (limits.amount.min=%s)",
+                symbol, old_prec, min_amount, min_amount,
+            )
+    if fixed:
+        logger.info("[Gate精度修正] 共修正 %s 个合约的 precision.amount", fixed)
+
+
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
     """
     按账户创建/复用 ccxt 实例（binance / okx / hyperliquid）。
@@ -1640,6 +1687,7 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
             }
         )
         ex.options["adjustForTimeDifference"] = True
+        _gate_fix_precision(ex)
     else:
         raise ValueError("暂仅支持 binance / okx / hyperliquid / gate")
     with _exchange_cache_lock:
@@ -2231,11 +2279,12 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     )
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
                 order_amt = _round_amount_to_precision(order_amt, mkt)
-                if order_amt < 1:
-                    min_cost_usdt = ct * (market_price or 0) if ct > 0 else 0
+                min_contracts = _get_min_contracts(exchange, mkt)
+                if order_amt < min_contracts:
+                    min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
                     raise ValueError(
-                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足1张）。"
-                        f" 每张={ct} {base_coin}，最小下单1张≈{min_cost_usdt:.2f} USDT。"
+                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足最小 {min_contracts} 张）。"
+                        f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
                         f" 请将 quote_amount 调大。"
                     )
             elif _exchange_id(exchange) in ("okx",) and ct > 0:
@@ -2283,11 +2332,12 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     )
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
                 order_amt = _round_amount_to_precision(order_amt, mkt)
-                if order_amt < 1:
-                    min_cost_usdt = ct * (market_price or 0) if ct > 0 else 0
+                min_contracts = _get_min_contracts(exchange, mkt)
+                if order_amt < min_contracts:
+                    min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
                     raise ValueError(
-                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足1张）。"
-                        f" 每张={ct} {base_coin}，最小下单1张≈{min_cost_usdt:.2f} USDT。"
+                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足最小 {min_contracts} 张）。"
+                        f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
                         f" 请增加 amount 或改用 quote_amount。"
                     )
             elif _exchange_id(exchange) in ("okx",) and ct > 0:
