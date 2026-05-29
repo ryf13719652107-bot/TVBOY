@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -1152,6 +1153,26 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
         return order
 
 
+def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
+    """根据市场精度手动取整 amount，兼容 DECIMAL_PLACES 和 TICK_SIZE 两种精度模式。
+    Gate 使用 TICK_SIZE 模式（precision.amount=1 表示步长为1，即整数）；
+    ccxt 的 amount_to_precision 在取整后为 0 时会抛 InvalidOrder，
+    而 create_order 内部也会再调一次，所以必须提前手动取整。"""
+    if not isinstance(mkt, dict):
+        return float(int(amount)) if amount >= 1 else amount
+    prec = mkt.get("precision", {})
+    amount_prec = prec.get("amount") if isinstance(prec, dict) else None
+    if amount_prec is None:
+        return float(int(amount)) if amount >= 1 else amount
+    tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
+    if tick_size >= 1:
+        return float(math.floor(float(amount) / tick_size) * tick_size)
+    elif tick_size > 0:
+        factor = 10.0 ** round(-math.log10(tick_size))
+        return math.floor(float(amount) * factor) / factor
+    return float(int(amount)) if amount >= 1 else amount
+
+
 def _get_min_contracts(exchange, mkt: dict | None) -> float:
     """获取交易所最小合约张数。OKX/Gate 合约张数须按市场精度取整（多数为整数）。"""
     _raw = None
@@ -1951,10 +1972,29 @@ def _okx_linear_swap_base_qty_to_contract_amount(
     if _exchange_id(exchange) not in ("okx", "gate") or BINANCE_DEFAULT_TYPE != "future":
         return float(base_coin_qty)
     mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
-    if not isinstance(mkt, dict) or not mkt.get("swap") or not mkt.get("linear"):
+    if not isinstance(mkt, dict):
+        logger.warning("[合约转换] %s 市场数据未找到，无法转换张数", symbol)
+        return float(base_coin_qty)
+    if not mkt.get("swap") or not mkt.get("linear"):
+        logger.warning("[合约转换] %s 非线性永续(swap=%s linear=%s)，跳过张数转换", symbol, mkt.get("swap"), mkt.get("linear"))
         return float(base_coin_qty)
     ct = float(mkt.get("contractSize") or 0)
     if ct <= 0:
+        info = mkt.get("info") or {}
+        for key in ("ct_val", "ctVal", "contract_size", "contractSize", "quanto_multiplier"):
+            raw = info.get(key)
+            if raw is not None:
+                try:
+                    ct = float(raw)
+                    if ct > 0:
+                        logger.info("[合约转换] %s contractSize 未在标准字段找到，从 info.%s=%s 获取", symbol, key, raw)
+                        break
+                except (TypeError, ValueError):
+                    pass
+    if ct <= 0:
+        logger.error("[合约转换] %s 无法获取 contractSize，市场信息: swap=%s linear=%s contractSize=%s info_keys=%s",
+                     symbol, mkt.get("swap"), mkt.get("linear"), mkt.get("contractSize"),
+                     list((mkt.get("info") or {}).keys())[:10])
         return float(base_coin_qty)
     return float(base_coin_qty) / ct
 
@@ -2189,11 +2229,17 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f"最小下单名义约 {min_cost:.2f} USDT。"
                         f" 请将 quote_amount 调至至少 {min_cost:.2f}。"
                     )
-            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
-                try:
-                    order_amt = float(exchange.amount_to_precision(symbol, order_amt))
-                except Exception:
-                    order_amt = float(int(order_amt)) if _exchange_id(exchange) == "gate" else order_amt
+            if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
+                order_amt = _round_amount_to_precision(order_amt, mkt)
+                if order_amt < 1:
+                    min_cost_usdt = ct * (market_price or 0) if ct > 0 else 0
+                    raise ValueError(
+                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足1张）。"
+                        f" 每张={ct} {base_coin}，最小下单1张≈{min_cost_usdt:.2f} USDT。"
+                        f" 请将 quote_amount 调大。"
+                    )
+            elif _exchange_id(exchange) in ("okx",) and ct > 0:
+                order_amt = _round_amount_to_precision(order_amt, mkt)
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
@@ -2235,11 +2281,17 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f"最小下单名义约 {min_base} {base_coin}。"
                         f" 请增加 amount 或改用 quote_amount。"
                     )
-            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
-                try:
-                    order_amt = float(exchange.amount_to_precision(symbol, order_amt))
-                except Exception:
-                    order_amt = float(int(order_amt)) if _exchange_id(exchange) == "gate" else order_amt
+            if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
+                order_amt = _round_amount_to_precision(order_amt, mkt)
+                if order_amt < 1:
+                    min_cost_usdt = ct * (market_price or 0) if ct > 0 else 0
+                    raise ValueError(
+                        f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足1张）。"
+                        f" 每张={ct} {base_coin}，最小下单1张≈{min_cost_usdt:.2f} USDT。"
+                        f" 请增加 amount 或改用 quote_amount。"
+                    )
+            elif _exchange_id(exchange) in ("okx",) and ct > 0:
+                order_amt = _round_amount_to_precision(order_amt, mkt)
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )

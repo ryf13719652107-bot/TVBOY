@@ -229,11 +229,21 @@ class TpSlMonitor:
 
         amount = abs(pos_size)
 
-        try:
-            amount = float(ex.amount_to_precision(ex_symbol, amount))
-        except Exception:
-            if getattr(ex, "id", "") == "gate":
-                amount = float(int(amount))
+        if getattr(ex, "id", "") == "gate":
+            mkt = ex.markets.get(ex_symbol) if getattr(ex, "markets", None) else None
+            if isinstance(mkt, dict):
+                prec = mkt.get("precision", {})
+                amount_prec = prec.get("amount") if isinstance(prec, dict) else None
+                tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
+                if tick_size >= 1:
+                    amount = float(int(amount / tick_size) * tick_size)
+                elif tick_size > 0:
+                    import math as _math
+                    factor = 10.0 ** round(-_math.log10(tick_size))
+                    amount = _math.floor(amount * factor) / factor
+            if amount < 1:
+                logger.warning("[%s] Gate 合约止盈止损张数 %.2f 不足1张，跳过", user_symbol, amount)
+                return
 
         # 取消该交易对的旧挂单
         self._cancel_symbol_orders(ex, ex_symbol, user_symbol)
@@ -452,11 +462,18 @@ class TpSlMonitor:
                         pass
 
                 amount = abs(pos_size)
-                try:
-                    amount = float(ex.amount_to_precision(ex_symbol, amount))
-                except Exception:
-                    if getattr(ex, "id", "") == "gate":
-                        amount = float(int(amount))
+                if getattr(ex, "id", "") == "gate":
+                    mkt = ex.markets.get(ex_symbol) if getattr(ex, "markets", None) else None
+                    if isinstance(mkt, dict):
+                        prec = mkt.get("precision", {})
+                        amount_prec = prec.get("amount") if isinstance(prec, dict) else None
+                        tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
+                        if tick_size >= 1:
+                            amount = float(int(amount / tick_size) * tick_size)
+                        elif tick_size > 0:
+                            import math as _math
+                            factor = 10.0 ** round(-_math.log10(tick_size))
+                            amount = _math.floor(amount * factor) / factor
                 sl_side = "sell" if pos_side == "long" else "buy"
                 try:
                     ex.create_order(
