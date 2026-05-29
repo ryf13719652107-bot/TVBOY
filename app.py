@@ -1153,7 +1153,7 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_min_contracts(exchange, mkt: dict | None) -> float:
-    """获取交易所最小合约张数。OKX 必须整数（≥1），Gate 支持小数张。"""
+    """获取交易所最小合约张数。OKX/Gate 合约张数须按市场精度取整（多数为整数）。"""
     _raw = None
     if isinstance(mkt, dict):
         _raw = mkt.get("limits", {}).get("amount", {}).get("min")
@@ -1162,9 +1162,9 @@ def _get_min_contracts(exchange, mkt: dict | None) -> float:
     else:
         min_val = 1.0
     if _exchange_id(exchange) == "okx":
-        # OKX 合约必须整张
         return max(1.0, float(int(min_val)))
-    # Gate 支持小数张，直接使用市场报告的精度
+    if _exchange_id(exchange) == "gate":
+        return max(1.0, float(int(min_val)))
     return max(min_val, 0.0) if min_val > 0 else 1.0
 
 
@@ -2189,6 +2189,11 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f"最小下单名义约 {min_cost:.2f} USDT。"
                         f" 请将 quote_amount 调至至少 {min_cost:.2f}。"
                     )
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                try:
+                    order_amt = float(exchange.amount_to_precision(symbol, order_amt))
+                except Exception:
+                    order_amt = float(int(order_amt)) if _exchange_id(exchange) == "gate" else order_amt
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
@@ -2230,6 +2235,11 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f"最小下单名义约 {min_base} {base_coin}。"
                         f" 请增加 amount 或改用 quote_amount。"
                     )
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                try:
+                    order_amt = float(exchange.amount_to_precision(symbol, order_amt))
+                except Exception:
+                    order_amt = float(int(order_amt)) if _exchange_id(exchange) == "gate" else order_amt
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )

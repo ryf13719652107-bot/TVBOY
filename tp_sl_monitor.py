@@ -229,6 +229,12 @@ class TpSlMonitor:
 
         amount = abs(pos_size)
 
+        try:
+            amount = float(ex.amount_to_precision(ex_symbol, amount))
+        except Exception:
+            if getattr(ex, "id", "") == "gate":
+                amount = float(int(amount))
+
         # 取消该交易对的旧挂单
         self._cancel_symbol_orders(ex, ex_symbol, user_symbol)
 
@@ -446,6 +452,11 @@ class TpSlMonitor:
                         pass
 
                 amount = abs(pos_size)
+                try:
+                    amount = float(ex.amount_to_precision(ex_symbol, amount))
+                except Exception:
+                    if getattr(ex, "id", "") == "gate":
+                        amount = float(int(amount))
                 sl_side = "sell" if pos_side == "long" else "buy"
                 try:
                     ex.create_order(
