@@ -435,7 +435,7 @@ class TpSlMonitor:
 
             if drawdown >= be_drawdown:
                 logger.info(
-                    "[%s] 保本止损触发: 回撤 %.2f 点 ≥ %.2f 点，移至保本价",
+                    "[%s] 保本回撤触发: 回撤 %.2f 点 ≥ %.2f 点，立即市价平仓",
                     user_symbol, drawdown, be_drawdown,
                 )
                 sl_oid = str(sl_order.get("id", ""))
@@ -448,26 +448,13 @@ class TpSlMonitor:
                 amount = abs(pos_size)
                 sl_side = "sell" if pos_side == "long" else "buy"
                 try:
-                    new_sl = ex.create_order(
-                        ex_symbol, "stop_market", sl_side, amount, entry_price,
-                        {"stopPrice": entry_price, "reduceOnly": True},
+                    ex.create_order(
+                        ex_symbol, "market", sl_side, amount, None,
+                        {"reduceOnly": True},
                     )
-                    new_oid = str(new_sl.get("id", ""))
-                    logger.info("[%s] 保本 SL 已挂: entry=%.4f id=%s", user_symbol, entry_price, new_oid)
-                    with self._lock:
-                        sd2 = self._sd(user_symbol)
-                        sd2["sl_order_id"] = new_oid
-                        sd2["state"] = "breakeven"
+                    logger.info("[%s] 保本市价平仓完成", user_symbol)
                 except Exception as e:
-                    logger.warning("[%s] 挂保本 SL 失败: %s", user_symbol, e)
-                    try:
-                        ex.create_order(
-                            ex_symbol, "market", sl_side, amount, None,
-                            {"reduceOnly": True},
-                        )
-                        logger.info("[%s] 保本直接市价平仓完成", user_symbol)
-                    except Exception as e2:
-                        logger.error("[%s] 保本市价平仓也失败: %s", user_symbol, e2)
+                    logger.error("[%s] 保本市价平仓失败: %s", user_symbol, e)
 
         with self._lock:
             sd3 = self._sd(user_symbol)
