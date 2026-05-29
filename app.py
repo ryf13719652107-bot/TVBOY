@@ -2093,34 +2093,39 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                 cost = DEFAULT_QUOTE_AMOUNT
                 amt = None
     elif bool(payload.get("_is_reversal")) and BINANCE_DEFAULT_TYPE == "future":
-        if amount is None:
-            if quote_amount is not None and market_price is not None and market_price > 0:
-                amount = float(quote_amount) / market_price
-                logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
-            else:
-                raise ValueError("反手信号缺少有效 amount/contracts/quote_amount，无法计算平仓+开仓总数量")
-        target_qty = _reversal_target_order_qty(payload, float(amount))
-        total_qty = _reversal_total_order_qty(
-            exchange, symbol, action, target_qty
-        )
-        unit = "张" if _exchange_uses_contract_lots(exchange) else "标的币"
-        logger.info(
-            "[反手] %s %s 目标新仓=%s%s 合计下单≈%s%s（含平旧仓）",
-            symbol,
-            action,
-            target_qty,
-            unit,
-            total_qty,
-            unit,
-        )
-        cost = None
-        amt = _okx_linear_swap_amount_to_base(
-            exchange,
-            symbol,
-            total_qty,
-            payload,
-            from_position_contracts=_exchange_uses_contract_lots(exchange),
-        )
+        # 无持仓时不走反手逻辑，按普通开仓处理
+        pos_abs = _futures_net_position_abs(exchange, symbol) or 0
+        if pos_abs <= 0:
+            logger.info("[反手] 当前无持仓可反，按普通开仓处理")
+        else:
+            if amount is None:
+                if quote_amount is not None and market_price is not None and market_price > 0:
+                    amount = float(quote_amount) / market_price
+                    logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
+                else:
+                    raise ValueError("反手信号缺少有效 amount/contracts/quote_amount，无法计算平仓+开仓总数量")
+            target_qty = _reversal_target_order_qty(payload, float(amount))
+            total_qty = _reversal_total_order_qty(
+                exchange, symbol, action, target_qty
+            )
+            unit = "张" if _exchange_uses_contract_lots(exchange) else "标的币"
+            logger.info(
+                "[反手] %s %s 目标新仓=%s%s 合计下单≈%s%s（含平旧仓）",
+                symbol,
+                action,
+                target_qty,
+                unit,
+                total_qty,
+                unit,
+            )
+            cost = None
+            amt = _okx_linear_swap_amount_to_base(
+                exchange,
+                symbol,
+                total_qty,
+                payload,
+                from_position_contracts=_exchange_uses_contract_lots(exchange),
+            )
     else:
         if quote_amount is not None:
             cost = float(quote_amount)
