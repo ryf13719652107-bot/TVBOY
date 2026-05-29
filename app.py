@@ -2037,8 +2037,8 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
     if action not in ("buy", "sell"):
         raise ValueError(f"action/side 必须是 buy 或 sell，当前: {action}")
 
-    quote_amount = payload.get("quote_amount")
-    amount = payload.get("amount")
+    quote_amount = _parse_tv_numeric_field(payload, "quote_amount")
+    amount = _parse_tv_numeric_field(payload, "amount", "contracts")
 
     # OKX 合约：tdMode 须与账户一致；默认 cross，逐仓用户在 .env 设 OKX_TD_MODE=isolated
     okx_params: dict[str, Any] = {}
@@ -2094,7 +2094,11 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                 amt = None
     elif bool(payload.get("_is_reversal")) and BINANCE_DEFAULT_TYPE == "future":
         if amount is None:
-            raise ValueError("反手信号缺少有效 contracts/amount，无法计算平仓+开仓总数量")
+            if quote_amount is not None and market_price is not None and market_price > 0:
+                amount = float(quote_amount) / market_price
+                logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
+            else:
+                raise ValueError("反手信号缺少有效 amount/contracts/quote_amount，无法计算平仓+开仓总数量")
         target_qty = _reversal_target_order_qty(payload, float(amount))
         total_qty = _reversal_total_order_qty(
             exchange, symbol, action, target_qty
