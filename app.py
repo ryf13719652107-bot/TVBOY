@@ -1154,10 +1154,9 @@ def _merge_order_with_fetch(exchange, order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
-    """根据市场精度手动取整 amount，兼容 DECIMAL_PLACES 和 TICK_SIZE 两种精度模式。
-    Gate 使用 TICK_SIZE 模式，但 ccxt 报告的 precision.amount 可能偏大
-    （如 ETH/USDT:USDT 报告 1，实际步长 0.1），
-    此时用 limits.amount.min 校正步长。"""
+    """根据市场精度手动取整 amount，兼容 TICK_SIZE 和 DECIMAL_PLACES 模式。
+    Gate 合约经 _gate_fix_precision 修正后 precision.amount = quanto_multiplier（如 0.01），
+    此函数按该步长向下取整。"""
     if not isinstance(mkt, dict):
         return float(int(amount)) if amount >= 1 else amount
     prec = mkt.get("precision", {})
@@ -1166,9 +1165,6 @@ def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
         return float(int(amount)) if amount >= 1 else amount
     tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
     if tick_size >= 1:
-        min_amt = float((mkt.get("limits") or {}).get("amount", {}).get("min") or 0)
-        if 0 < min_amt < tick_size:
-            tick_size = min_amt
         return float(math.floor(float(amount) / tick_size) * tick_size)
     elif tick_size > 0:
         factor = 10.0 ** round(-math.log10(tick_size))
@@ -1537,11 +1533,14 @@ def start_preload_trade_markets_in_background() -> None:
 
 
 def _gate_fix_precision(exchange) -> None:
-    """修正 Gate 合约市场 ccxt 报告的 precision.amount。
-    ccxt 对 Gate 合约的 precision.amount 使用 TICK_SIZE 模式，但部分合约报告的值偏大
-    （如 ETH/USDT:USDT 报告 1，实际步长为 0.1）。
-    此函数在 markets 加载后，用 limits.amount.min 校正 precision.amount，
-    使 ccxt 内部的 amount_to_precision 能正确取整。"""
+    """修正 Gate 合约市场 ccxt 报告的 precision.amount 和 limits.amount.min。
+    Gate API 返回:
+      - quanto_multiplier: 每张合约对应的基础币数量（如 ETH/USDT = 0.01）
+      - enable_decimal: 是否支持小数张（true 时步长 = quanto_multiplier）
+      - order_size_min: 最小下单张数（多数为 0，即无最小限制）
+    ccxt 错误地将 precision.amount 设为 1（整数步长），limits.amount.min 也设为 1，
+    导致 amount_to_precision 把合法的小数张取整为 0 后报错。
+    修正逻辑：用 quanto_multiplier（即 contractSize）作为 precision.amount 的步长。"""
     try:
         exchange.load_markets()
     except Exception:
@@ -1552,32 +1551,52 @@ def _gate_fix_precision(exchange) -> None:
     for symbol, mkt in exchange.markets.items():
         if not isinstance(mkt, dict) or not mkt.get("swap"):
             continue
+        info = mkt.get("info") or {}
+        quanto = info.get("quanto_multiplier")
+        enable_decimal = info.get("enable_decimal")
+        order_size_min = info.get("order_size_min")
+        if quanto is None:
+            continue
+        try:
+            quanto = float(quanto)
+        except (TypeError, ValueError):
+            continue
+        if quanto <= 0:
+            continue
         prec = mkt.get("precision")
-        if not isinstance(prec, dict):
-            continue
-        amount_prec = prec.get("amount")
+        if isinstance(prec, dict):
+            old_prec = prec.get("amount")
+            new_prec = quanto
+            if enable_decimal is True or str(enable_decimal).lower() == "true":
+                new_prec = quanto
+            else:
+                new_prec = 1.0
+            if old_prec != new_prec:
+                prec["amount"] = new_prec
+                fixed += 1
+                logger.debug(
+                    "[Gate精度修正] %s precision.amount %s → %s (quanto_multiplier=%s, enable_decimal=%s)",
+                    symbol, old_prec, new_prec, quanto, enable_decimal,
+                )
         limits = mkt.get("limits")
-        if not isinstance(limits, dict):
-            continue
-        amount_limits = limits.get("amount")
-        if not isinstance(amount_limits, dict):
-            continue
-        min_amount = amount_limits.get("min")
-        if min_amount is None:
-            continue
-        min_amount = float(min_amount)
-        if min_amount <= 0:
-            continue
-        if amount_prec is not None and float(amount_prec) > min_amount:
-            old_prec = prec["amount"]
-            prec["amount"] = min_amount
-            fixed += 1
-            logger.debug(
-                "[Gate精度修正] %s precision.amount %s → %s (limits.amount.min=%s)",
-                symbol, old_prec, min_amount, min_amount,
-            )
+        if isinstance(limits, dict):
+            amt_limits = limits.get("amount")
+            if isinstance(amt_limits, dict):
+                try:
+                    real_min = float(order_size_min) if order_size_min is not None else 0
+                except (TypeError, ValueError):
+                    real_min = 0
+                old_min = amt_limits.get("min")
+                if real_min == 0:
+                    real_min = quanto
+                if old_min is not None and float(old_min) > real_min:
+                    amt_limits["min"] = real_min
+                    logger.debug(
+                        "[Gate精度修正] %s limits.amount.min %s → %s",
+                        symbol, old_min, real_min,
+                    )
     if fixed:
-        logger.info("[Gate精度修正] 共修正 %s 个合约的 precision.amount", fixed)
+        logger.info("[Gate精度修正] 共修正 %s 个合约的 precision.amount / limits", fixed)
 
 
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
