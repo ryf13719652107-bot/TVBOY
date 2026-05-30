@@ -1682,6 +1682,22 @@ def _gate_order_is_trigger(order_type: str, params: dict[str, Any] | None) -> bo
     )
 
 
+def _gate_price_order_size_int(signed_size: float) -> int:
+    """Gate 条件单 API 的 initial.size 必须为 int64，不能传 4.0 这类浮点。"""
+    if signed_size == 0:
+        raise ValueError("Gate 条件单 size 为 0")
+    rounded = int(round(signed_size))
+    if rounded == 0:
+        rounded = 1 if signed_size > 0 else -1
+    if abs(signed_size - rounded) > 1e-9:
+        logger.warning(
+            "Gate 条件单仅支持整数张，size=%s 已取整为 %s",
+            signed_size,
+            rounded,
+        )
+    return rounded
+
+
 def _gate_create_trigger_order_decimal_safe(
     exchange,
     symbol: str,
@@ -1696,6 +1712,7 @@ def _gate_create_trigger_order_decimal_safe(
     market = exchange.market(symbol)
     amount_prec = str(exchange.amount_to_precision(symbol, amount))
     signed_size = float(amount_prec) if str(side).lower() == "buy" else -float(amount_prec)
+    signed_size = _gate_price_order_size_int(signed_size)
     stop_price = (
         params.get("stopLossPrice")
         or params.get("stopPrice")
