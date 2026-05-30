@@ -2212,7 +2212,12 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                 amount = float(quote_amount) / market_price
                 logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
             else:
-                raise ValueError("反手信号缺少有效 amount/contracts/quote_amount，无法计算平仓+开仓总数量")
+                ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
+                if ps is not None and ps != 0:
+                    amount = abs(float(ps))
+                    logger.info("[反手] 未传 amount/quote_amount，由 position_size 推算≈%.4f", amount)
+                else:
+                    raise ValueError("反手信号缺少有效 amount/contracts/quote_amount/position_size，无法计算平仓+开仓总数量")
         target_qty = _reversal_target_order_qty(payload, float(amount))
         total_qty = _reversal_total_order_qty(
             exchange, symbol, action, target_qty
