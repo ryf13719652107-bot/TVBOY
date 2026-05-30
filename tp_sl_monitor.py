@@ -477,6 +477,12 @@ class TpSlMonitor:
                             import math as _math
                             factor = 10.0 ** round(-_math.log10(tick_size))
                             amount = _math.floor(amount * factor) / factor
+                        min_contracts = float((mkt.get("limits") or {}).get("amount", {}).get("min") or tick_size)
+                        if min_contracts <= 0:
+                            min_contracts = tick_size if tick_size > 0 else 1
+                        if amount < min_contracts:
+                            logger.warning("[%s] Gate 合约保本平仓张数 %.4f 不足最小 %.4f 张，跳过", user_symbol, amount, min_contracts)
+                            continue
                 sl_side = "sell" if pos_side == "long" else "buy"
                 try:
                     ex.create_order(

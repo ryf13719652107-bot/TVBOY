@@ -1588,7 +1588,10 @@ def _gate_fix_precision(exchange) -> None:
                     real_min = 0
                 old_min = amt_limits.get("min")
                 if real_min == 0:
-                    real_min = quanto
+                    if enable_decimal is True or str(enable_decimal).lower() == "true":
+                        real_min = quanto
+                    else:
+                        real_min = 1.0
                 if old_min is not None and float(old_min) > real_min:
                     amt_limits["min"] = real_min
                     logger.debug(
@@ -2285,6 +2288,8 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     base_coin,
                     cost,
                 )
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                order_amt = _round_amount_to_precision(order_amt, mkt)
             if _exchange_id(exchange) == "okx" and ct > 0:
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
@@ -2297,7 +2302,6 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f" 请将 quote_amount 调至至少 {min_cost:.2f}。"
                     )
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
-                order_amt = _round_amount_to_precision(order_amt, mkt)
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
                     min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
@@ -2306,8 +2310,6 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
                         f" 请将 quote_amount 调大。"
                     )
-            elif _exchange_id(exchange) in ("okx",) and ct > 0:
-                order_amt = _round_amount_to_precision(order_amt, mkt)
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
@@ -2339,6 +2341,8 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     amt,
                     base_coin,
                 )
+            if _exchange_id(exchange) in ("okx", "gate") and ct > 0:
+                order_amt = _round_amount_to_precision(order_amt, mkt)
             if _exchange_id(exchange) == "okx" and ct > 0:
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
@@ -2350,7 +2354,6 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f" 请增加 amount 或改用 quote_amount。"
                     )
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
-                order_amt = _round_amount_to_precision(order_amt, mkt)
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
                     min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
@@ -2359,8 +2362,6 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                         f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
                         f" 请增加 amount 或改用 quote_amount。"
                     )
-            elif _exchange_id(exchange) in ("okx",) and ct > 0:
-                order_amt = _round_amount_to_precision(order_amt, mkt)
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
             )
