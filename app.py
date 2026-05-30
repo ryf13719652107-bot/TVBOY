@@ -198,6 +198,15 @@ DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
 BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
 # 默认每笔用多少 USDT（可被请求体 quote_amount 覆盖）
 DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
+
+
+def _load_default_webhook_sizing_mode() -> str:
+    """Webhook 默认数量语义：base=标的币数量，quote=USDT 名义金额。"""
+    v = (os.getenv("DEFAULT_WEBHOOK_SIZING_MODE", "base") or "base").strip().lower()
+    return v if v in ("base", "quote") else "base"
+
+
+DEFAULT_WEBHOOK_SIZING_MODE = _load_default_webhook_sizing_mode()
 # 启动时预加载交易所 markets（减少重启后首单 load_markets 冷启动延迟）
 PRELOAD_MARKETS_ON_STARTUP = (
     os.getenv("PRELOAD_MARKETS_ON_STARTUP", "true").lower()
@@ -909,6 +918,9 @@ def _trim_payload_for_log(payload: dict[str, Any]) -> dict[str, Any]:
         "ticker",
         "quote_amount",
         "amount",
+        "contracts",
+        "sizing_mode",
+        "_sizing_mode",
         "reduce_only",
         "prev_market_position",
         "market_position",
@@ -1501,7 +1513,7 @@ def _failures_24h_count_in_list(logs: list[dict[str, Any]]) -> int:
 def refresh_env() -> None:
     """每次请求前从 .env 重新载入。"""
     global WEBHOOK_SECRET, DASHBOARD_SECRET, DASHBOARD_VIEWER_SECRET
-    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT
+    global BINANCE_DEFAULT_TYPE, DEFAULT_QUOTE_AMOUNT, DEFAULT_WEBHOOK_SIZING_MODE
     global USE_TESTNET, WEBHOOK_POST_DELAY_SEC, PRELOAD_MARKETS_ON_STARTUP
     global BALANCE_CACHE_TTL_SEC, WEBHOOK_TRADE_MAX_WORKERS, WEBHOOK_FINALIZE_MAX_WORKERS, WEBHOOK_LOG_PAYLOAD
     global LOG_HOT_MAX_EXECUTION, LOG_HOT_MAX_SIGNAL, DISPLAY_EST_FEE_RATE
@@ -1512,7 +1524,7 @@ def refresh_env() -> None:
     DASHBOARD_VIEWER_SECRET = (os.getenv("DASHBOARD_VIEWER_SECRET") or "").strip()
     BINANCE_DEFAULT_TYPE = os.getenv("BINANCE_DEFAULT_TYPE", "future").lower()
     DEFAULT_QUOTE_AMOUNT = float(os.getenv("DEFAULT_QUOTE_AMOUNT", "20"))
-    USE_TESTNET = os.getenv("BINANCE_USE_TESTNET", "false").lower() == "true"
+    DEFAULT_WEBHOOK_SIZING_MODE = _load_default_webhook_sizing_mode()
     WEBHOOK_POST_DELAY_SEC = float(os.getenv("WEBHOOK_POST_DELAY_SEC", "10"))
     WEBHOOK_TRADE_MAX_WORKERS = _env_int("WEBHOOK_TRADE_MAX_WORKERS", 8)
     WEBHOOK_FINALIZE_MAX_WORKERS = _env_int("WEBHOOK_FINALIZE_MAX_WORKERS", 4)
@@ -1790,6 +1802,20 @@ def _webhook_targets_scoped_by_payload(
 
 
 
+def _payload_wants_quote_amount_sizing(payload: dict[str, Any]) -> bool:
+    """TV 告警是否明确按 USDT（quote_amount）下单。"""
+    sizing = str(
+        payload.get("sizing_mode")
+        or payload.get("order_sizing")
+        or payload.get("qty_mode")
+        or ""
+    ).strip().lower()
+    if sizing in ("quote", "usdt", "quote_amount", "cost"):
+        return True
+    flag = payload.get("use_quote_amount")
+    return flag in (True, 1, "1", "true", "yes", "on")
+
+
 def _payload_wants_base_amount_sizing(payload: dict[str, Any]) -> bool:
     """TV 告警是否按标的币数量（amount）而非 USDT（quote_amount）下单。"""
     sizing = str(
@@ -1804,13 +1830,33 @@ def _payload_wants_base_amount_sizing(payload: dict[str, Any]) -> bool:
     return flag in (True, 1, "1", "true", "yes", "on")
 
 
+def _resolve_webhook_sizing_mode(
+    payload: dict[str, Any],
+    *,
+    base_amt: float | None,
+    quote_usdt: float | None,
+) -> str:
+    """解析 Webhook 数量语义：base=标的币，quote=USDT。"""
+    if _payload_wants_base_amount_sizing(payload):
+        return "base"
+    if _payload_wants_quote_amount_sizing(payload):
+        return "quote"
+    if base_amt is not None and quote_usdt is not None:
+        return "base"
+    if base_amt is not None and quote_usdt is None:
+        return "base"
+    if quote_usdt is not None and base_amt is None:
+        return DEFAULT_WEBHOOK_SIZING_MODE
+    return DEFAULT_WEBHOOK_SIZING_MODE
+
+
 def build_order_payload_for_account(
     base: dict[str, Any], account: dict[str, Any]
 ) -> dict[str, Any]:
     """
     多账户下单：TV 消息体提供 quote_amount（USDT）或 amount（标的币数量）。
-    sizing_mode=base / use_base_amount=true 时优先按 amount 下单；
-    仅传 amount、不传 quote_amount 时，默认按标的币数量。
+    sizing_mode=base / DEFAULT_WEBHOOK_SIZING_MODE=base 时，quote_amount 也可表示标的币数量
+    （兼容旧模板把 {{strategy.order.contracts}} 填在 quote_amount 的情况）。
     """
     p = dict(base)
 
@@ -1820,24 +1866,35 @@ def build_order_payload_for_account(
             if raw is None or str(raw).strip() == "":
                 continue
             try:
-                v = float(str(raw).replace(",", "").strip())
+                v = abs(float(str(raw).replace(",", "").strip()))
                 if v > 0:
                     return v
             except (TypeError, ValueError):
                 continue
         return None
 
-    use_base = _payload_wants_base_amount_sizing(base)
     base_amt = _parse_positive("amount", "contracts")
     quote_usdt = _parse_positive("quote_amount")
+    mode = _resolve_webhook_sizing_mode(
+        base, base_amt=base_amt, quote_usdt=quote_usdt
+    )
 
-    if use_base:
-        if base_amt is None:
+    if mode == "base":
+        qty = base_amt if base_amt is not None else quote_usdt
+        if qty is None:
             raise ValueError(
-                "TV 消息 sizing_mode=base，但未提供有效的 amount（标的币数量）。"
-                "请在告警中设置 amount，例如 {{strategy.order.contracts}}。"
+                "按标的币数量下单，但未提供有效的 amount / contracts / quote_amount。"
+                "请在 TV 告警中设置 amount={{strategy.order.contracts}}，"
+                "或设 sizing_mode=base。"
             )
-        p["amount"] = base_amt
+        if base_amt is None and quote_usdt is not None:
+            logger.info(
+                "[Webhook] 按标的币解读 quote_amount=%s（账户 %s，DEFAULT_WEBHOOK_SIZING_MODE=%s）",
+                quote_usdt,
+                account.get("id"),
+                DEFAULT_WEBHOOK_SIZING_MODE,
+            )
+        p["amount"] = qty
         p.pop("quote_amount", None)
         p["_sizing_mode"] = "payload_base_amount"
         return p
@@ -1856,7 +1913,8 @@ def build_order_payload_for_account(
 
     raise ValueError(
         "TV 消息未提供有效的 quote_amount（USDT）或 amount（标的币数量），无法下单。"
-        "按币数下单请传 amount 并设 sizing_mode=base；按 USDT 下单请传 quote_amount。"
+        "按币数下单请传 amount 或设 DEFAULT_WEBHOOK_SIZING_MODE=base；"
+        "按 USDT 下单请传 quote_amount 并设 sizing_mode=quote。"
     )
 
 
@@ -2447,7 +2505,7 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
                     raise ValueError(
                         f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足最小 {min_contracts} 张）。"
                         f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
-                        f" 请增加 amount 或改用 quote_amount（至少 {min_cost_usdt:.2f} USDT）。"
+                        f" 请增加 amount（至少 {min_contracts * ct:.8f} {base_coin}）。"
                     )
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
@@ -2552,6 +2610,7 @@ def api_status():
             "dashboard_viewer_secret_configured": bool(viewer),
             "auth_role": dashboard_auth_role(),
             "default_quote_amount": DEFAULT_QUOTE_AMOUNT,
+            "default_webhook_sizing_mode": DEFAULT_WEBHOOK_SIZING_MODE,
             "webhook_open_only": bs["webhook_open_only"],
             "webhook_pause_enabled": bs.get("webhook_pause_enabled", False),
             "webhook_pause_start_day": bs.get("webhook_pause_start_day", 5),
@@ -2559,7 +2618,10 @@ def api_status():
             "webhook_pause_end_day": bs.get("webhook_pause_end_day", 0),
             "webhook_pause_end_time": bs.get("webhook_pause_end_time", "08:00"),
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
-            "hint": "Webhook 下单：quote_amount=USDT 名义金额；按策略币数下单请传 amount 并设 sizing_mode=base。",
+            "hint": (
+                f"Webhook 默认数量语义={DEFAULT_WEBHOOK_SIZING_MODE}："
+                "base=标的币（amount 或 quote_amount 填币数）；quote=USDT 名义金额。"
+            ),
         }
     )
 

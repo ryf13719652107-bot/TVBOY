@@ -1701,13 +1701,19 @@
           const symbol = escHtml(p.symbol || item.symbol || "");
           const qty = (() => {
             const mode = String(p.sizing_mode || p._sizing_mode || "");
+            if ((mode.includes("base") || p.amount != null) && p.amount != null && p.amount !== "" && !p.quote_amount) {
+              return p.amount + " 币";
+            }
             if (mode.includes("base") && p.amount != null && p.amount !== "") {
               return p.amount + " 币";
             }
-            if (p.quote_amount != null && p.quote_amount !== "") {
+            if (p.quote_amount != null && p.quote_amount !== "" && mode.includes("quote")) {
               return p.quote_amount + " USDT";
             }
-            return p.amount || p.contracts || "";
+            if (p.quote_amount != null && p.quote_amount !== "" && !p.amount) {
+              return p.quote_amount + (mode.includes("base") ? " 币" : " USDT");
+            }
+            return p.amount ? p.amount + " 币" : (p.contracts || "");
           })();
           const acct = (item.accounts || []).map((a) => a.account_id || a.remark || "").filter(Boolean).join(", ");
           const okCount = (item.accounts || []).filter((a) => a.ok).length;
