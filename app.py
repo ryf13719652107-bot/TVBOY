@@ -1663,6 +1663,28 @@ def _gate_market_enable_decimal(mkt: dict | None) -> bool:
     return enable_decimal is True or str(enable_decimal).lower() == "true"
 
 
+def _gate_ensure_decimal_header(exchange) -> None:
+    """Gate 小数张 API 需 X-Gate-Size-Decimal: 1，条件单才能用 amount 字符串。"""
+    headers = dict(getattr(exchange, "headers", None) or {})
+    if headers.get("X-Gate-Size-Decimal") != "1":
+        headers["X-Gate-Size-Decimal"] = "1"
+        exchange.headers = headers
+
+
+def _gate_normalize_close_amount(exchange, symbol: str, pos_size: float) -> float:
+    """TP/SL 共用：按交易所精度规范化平仓张数（保留 4.9 这类小数张）。"""
+    amount = abs(float(pos_size))
+    if amount <= 0:
+        return 0.0
+    return float(exchange.amount_to_precision(symbol, amount))
+
+
+def _gate_signed_amount_str(exchange, symbol: str, amount: float, side: str) -> str:
+    """Gate 小数张 amount 字段：buy 为正、sell 为负的字符串。"""
+    prec = str(exchange.amount_to_precision(symbol, abs(float(amount))))
+    return prec if str(side).lower() == "buy" else f"-{prec}"
+
+
 def _gate_swap_order_needs_decimal_size(exchange, symbol: str) -> bool:
     """Gate USDT 永续 enable_decimal 时 ccxt 仍 int(size)，小数张会报错。"""
     if _exchange_id(exchange) != "gate" or BINANCE_DEFAULT_TYPE != "future":
@@ -1711,8 +1733,7 @@ def _gate_create_trigger_order_decimal_safe(
     params = dict(params or {})
     market = exchange.market(symbol)
     amount_prec = str(exchange.amount_to_precision(symbol, amount))
-    signed_size = float(amount_prec) if str(side).lower() == "buy" else -float(amount_prec)
-    signed_size = _gate_price_order_size_int(signed_size)
+    use_decimal_amount = _gate_market_enable_decimal(market)
     stop_price = (
         params.get("stopLossPrice")
         or params.get("stopPrice")
@@ -1728,9 +1749,13 @@ def _gate_create_trigger_order_decimal_safe(
     rule = 1 if str(side).lower() == "buy" else 2
     initial: dict[str, Any] = {
         "contract": market["id"],
-        "size": signed_size,
         "price": "0" if is_market else exchange.price_to_precision(symbol, price or stop_price),
     }
+    if use_decimal_amount:
+        initial["amount"] = _gate_signed_amount_str(exchange, symbol, amount, side)
+    else:
+        signed_size = float(amount_prec) if str(side).lower() == "buy" else -float(amount_prec)
+        initial["size"] = _gate_price_order_size_int(signed_size)
     if is_market:
         initial["tif"] = "ioc"
     elif time_in_force is not None:
@@ -1746,11 +1771,12 @@ def _gate_create_trigger_order_decimal_safe(
             "rule": rule,
         },
     }
+    qty_label = initial.get("amount") or initial.get("size")
     logger.info(
-        "[Gate小数张-条件单] %s %s size=%s trigger=%s rule=%s",
+        "[Gate小数张-条件单] %s %s qty=%s trigger=%s rule=%s",
         symbol,
         side,
-        signed_size,
+        qty_label,
         order_request["trigger"]["price"],
         rule,
     )
@@ -1932,6 +1958,7 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
             }
         )
         ex.options["adjustForTimeDifference"] = True
+        _gate_ensure_decimal_header(ex)
         _gate_fix_precision(ex)
         _gate_patch_create_order(ex)
     else:

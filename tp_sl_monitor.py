@@ -180,8 +180,13 @@ class TpSlMonitor:
             raise ValueError(f"账户未找到: {account_id or '未设置'}")
         ex = get_exchange_for_account(account, purpose="tp-sl")
         if getattr(ex, "id", "") == "gate":
-            from app import _gate_fix_precision, _gate_patch_create_order  # noqa: E402
+            from app import (  # noqa: E402
+                _gate_ensure_decimal_header,
+                _gate_fix_precision,
+                _gate_patch_create_order,
+            )
 
+            _gate_ensure_decimal_header(ex)
             _gate_fix_precision(ex)
             _gate_patch_create_order(ex)
         return ex
@@ -236,23 +241,25 @@ class TpSlMonitor:
         amount = abs(pos_size)
 
         if getattr(ex, "id", "") == "gate":
+            from app import _gate_effective_min_contracts, _gate_normalize_close_amount  # noqa: E402
+
+            amount = _gate_normalize_close_amount(ex, ex_symbol, pos_size)
             mkt = ex.markets.get(ex_symbol) if getattr(ex, "markets", None) else None
-            if isinstance(mkt, dict):
-                prec = mkt.get("precision", {})
-                amount_prec = prec.get("amount") if isinstance(prec, dict) else None
-                tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
-                if tick_size >= 1:
-                    amount = float(int(amount / tick_size) * tick_size)
-                elif tick_size > 0:
-                    import math as _math
-                    factor = 10.0 ** round(-_math.log10(tick_size))
-                    amount = _math.floor(amount * factor) / factor
-                min_contracts = float((mkt.get("limits") or {}).get("amount", {}).get("min") or tick_size)
-                if min_contracts <= 0:
-                    min_contracts = tick_size if tick_size > 0 else 1
-                if amount < min_contracts:
-                    logger.warning("[%s] Gate 合约止盈止损张数 %.4f 不足最小 %.4f 张，跳过", user_symbol, amount, min_contracts)
-                    return
+            min_contracts = _gate_effective_min_contracts(mkt)
+            if amount < min_contracts:
+                logger.warning(
+                    "[%s] Gate 合约止盈止损张数 %.4f 不足最小 %.4f 张，跳过",
+                    user_symbol,
+                    amount,
+                    min_contracts,
+                )
+                return
+            logger.info(
+                "[%s] Gate TP/SL 平仓张数=%s（持仓=%s）",
+                user_symbol,
+                amount,
+                pos_size,
+            )
 
         # 取消该交易对的旧挂单
         self._cancel_symbol_orders(ex, ex_symbol, user_symbol)
@@ -492,23 +499,19 @@ class TpSlMonitor:
 
                 amount = abs(pos_size)
                 if getattr(ex, "id", "") == "gate":
+                    from app import _gate_effective_min_contracts, _gate_normalize_close_amount  # noqa: E402
+
+                    amount = _gate_normalize_close_amount(ex, ex_symbol, pos_size)
                     mkt = ex.markets.get(ex_symbol) if getattr(ex, "markets", None) else None
-                    if isinstance(mkt, dict):
-                        prec = mkt.get("precision", {})
-                        amount_prec = prec.get("amount") if isinstance(prec, dict) else None
-                        tick_size = float(amount_prec) if isinstance(amount_prec, (int, float)) else 0
-                        if tick_size >= 1:
-                            amount = float(int(amount / tick_size) * tick_size)
-                        elif tick_size > 0:
-                            import math as _math
-                            factor = 10.0 ** round(-_math.log10(tick_size))
-                            amount = _math.floor(amount * factor) / factor
-                        min_contracts = float((mkt.get("limits") or {}).get("amount", {}).get("min") or tick_size)
-                        if min_contracts <= 0:
-                            min_contracts = tick_size if tick_size > 0 else 1
-                        if amount < min_contracts:
-                            logger.warning("[%s] Gate 合约保本平仓张数 %.4f 不足最小 %.4f 张，跳过", user_symbol, amount, min_contracts)
-                            return
+                    min_contracts = _gate_effective_min_contracts(mkt)
+                    if amount < min_contracts:
+                        logger.warning(
+                            "[%s] Gate 合约保本平仓张数 %.4f 不足最小 %.4f 张，跳过",
+                            user_symbol,
+                            amount,
+                            min_contracts,
+                        )
+                        return
                 sl_side = "sell" if pos_side == "long" else "buy"
                 try:
                     ex.create_order(
