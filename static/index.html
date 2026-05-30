@@ -913,7 +913,7 @@
         </div>
         <label for="tvWizardOutput" class="label-with-tip" style="margin-top: 0.75rem; display:flex;">
           <span class="label-text">生成结果</span>
-          <span class="help-tip" tabindex="0" data-tip="quote_amount 为 USDT 名义金额（如 100 表示 100 USDT）。仅开仓模式下不含 market_position 字段，平仓交给机器人 TP/SL；关闭仅开仓后模板会自动包含 prev_market_position、market_position 用于反手判断。可将 {{strategy.order.contracts}} 替换为固定数值或 Pine 中代表 USDT 的变量。">?</span>
+          <span class="help-tip" tabindex="0" data-tip="两种下单方式：① quote_amount=USDT 名义金额（如 100）；② 按策略币数：amount={{strategy.order.contracts}} 且 sizing_mode=base。勿把币数填进 quote_amount。仅开仓模式下不含 market_position；关闭后模板含 prev/market_position 用于反手。">?</span>
         </label>
         <p class="hint" id="tvWizardGenerateHint" style="margin-top: 0.35rem; font-size: 0.78rem; min-height: 1.1em;"></p>
         <textarea id="tvWizardOutput" style="min-height: 220px; font-size: 0.78rem; margin-top: 0.35rem;" placeholder="点「一键生成」后 JSON 会出现在这里…"></textarea>
@@ -1095,7 +1095,7 @@
     const accBtnToggleRawJson = document.getElementById("accBtnToggleRawJson");
     let accBalanceRawVisible = false;
 
-    /** 完整模板：含 market_position，用于允许反手 */
+    /** 完整模板：含 market_position，用于允许反手；按策略标的币数量下单 */
     const TV_TPL_WEBHOOK_FULL = `{
   "ticker": "{{ticker}}",
   "action": "{{strategy.order.action}}",
@@ -1104,14 +1104,15 @@
   "market_position": "{{strategy.market_position}}",
   "position_size": "{{strategy.position_size}}",
   "amount": "{{strategy.order.contracts}}",
-  "quote_amount": "{{strategy.order.contracts}}"
+  "sizing_mode": "base"
 }`;
-    /** 简洁模板：不含 market_position，平仓靠机器人 TP/SL */
+    /** 简洁模板：不含 market_position，平仓靠机器人 TP/SL；按策略标的币数量下单 */
     const TV_TPL_WEBHOOK_SIMPLE = `{
   "ticker": "{{ticker}}",
   "action": "{{strategy.order.action}}",
   "symbol": "{{ticker}}",
-  "quote_amount": "{{strategy.order.contracts}}"
+  "amount": "{{strategy.order.contracts}}",
+  "sizing_mode": "base"
 }`;
     const TV_TPL_WEBHOOK_BASE = TV_TPL_WEBHOOK_FULL;
     const TV_TPL_WEBHOOK_FOLLOW_TV = TV_TPL_WEBHOOK_FULL;
@@ -1698,7 +1699,16 @@
           const action = escHtml(p.action || "");
           const actionText = action === 'buy' ? '买入' : action === 'sell' ? '卖出' : action;
           const symbol = escHtml(p.symbol || item.symbol || "");
-          const qty = p.quote_amount || p.amount || p.contracts || "";
+          const qty = (() => {
+            const mode = String(p.sizing_mode || p._sizing_mode || "");
+            if (mode.includes("base") && p.amount != null && p.amount !== "") {
+              return p.amount + " 币";
+            }
+            if (p.quote_amount != null && p.quote_amount !== "") {
+              return p.quote_amount + " USDT";
+            }
+            return p.amount || p.contracts || "";
+          })();
           const acct = (item.accounts || []).map((a) => a.account_id || a.remark || "").filter(Boolean).join(", ");
           const okCount = (item.accounts || []).filter((a) => a.ok).length;
           const totalCount = (item.accounts || []).length;

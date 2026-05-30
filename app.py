@@ -1790,30 +1790,73 @@ def _webhook_targets_scoped_by_payload(
 
 
 
+def _payload_wants_base_amount_sizing(payload: dict[str, Any]) -> bool:
+    """TV 告警是否按标的币数量（amount）而非 USDT（quote_amount）下单。"""
+    sizing = str(
+        payload.get("sizing_mode")
+        or payload.get("order_sizing")
+        or payload.get("qty_mode")
+        or ""
+    ).strip().lower()
+    if sizing in ("base", "amount", "coin", "base_amount", "contracts_as_base"):
+        return True
+    flag = payload.get("use_base_amount")
+    return flag in (True, 1, "1", "true", "yes", "on")
+
+
 def build_order_payload_for_account(
     base: dict[str, Any], account: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    多账户下单：必须由 TV 消息体提供有效的 quote_amount（USDT 名义金额），
-    否则下单失败。
+    多账户下单：TV 消息体提供 quote_amount（USDT）或 amount（标的币数量）。
+    sizing_mode=base / use_base_amount=true 时优先按 amount 下单；
+    仅传 amount、不传 quote_amount 时，默认按标的币数量。
     """
     p = dict(base)
 
-    tv_quote_raw = base.get("quote_amount")
-    if tv_quote_raw is not None:
-        try:
-            qv = float(str(tv_quote_raw).replace(",", "").strip())
-        except (TypeError, ValueError):
-            qv = None
-        if qv is not None and qv > 0:
-            p["quote_amount"] = qv
-            p.pop("amount", None)
-            p["_sizing_mode"] = "payload_quote_amount"
-            return p
+    def _parse_positive(*keys: str) -> float | None:
+        for k in keys:
+            raw = base.get(k)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                v = float(str(raw).replace(",", "").strip())
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    use_base = _payload_wants_base_amount_sizing(base)
+    base_amt = _parse_positive("amount", "contracts")
+    quote_usdt = _parse_positive("quote_amount")
+
+    if use_base:
+        if base_amt is None:
+            raise ValueError(
+                "TV 消息 sizing_mode=base，但未提供有效的 amount（标的币数量）。"
+                "请在告警中设置 amount，例如 {{strategy.order.contracts}}。"
+            )
+        p["amount"] = base_amt
+        p.pop("quote_amount", None)
+        p["_sizing_mode"] = "payload_base_amount"
+        return p
+
+    if quote_usdt is not None:
+        p["quote_amount"] = quote_usdt
+        p.pop("amount", None)
+        p["_sizing_mode"] = "payload_quote_amount"
+        return p
+
+    if base_amt is not None:
+        p["amount"] = base_amt
+        p.pop("quote_amount", None)
+        p["_sizing_mode"] = "payload_base_amount"
+        return p
 
     raise ValueError(
-        f"TV 消息未提供有效的 quote_amount，无法下单。"
-        f"请在 TradingView 告警中设置 quote_amount 字段（USDT 名义金额）。"
+        "TV 消息未提供有效的 quote_amount（USDT）或 amount（标的币数量），无法下单。"
+        "按币数下单请传 amount 并设 sizing_mode=base；按 USDT 下单请传 quote_amount。"
     )
 
 
@@ -2516,7 +2559,7 @@ def api_status():
             "webhook_pause_end_day": bs.get("webhook_pause_end_day", 0),
             "webhook_pause_end_time": bs.get("webhook_pause_end_time", "08:00"),
             "display_est_fee_rate": DISPLAY_EST_FEE_RATE,
-            "hint": "Webhook 下单需 TV 消息提供有效的 quote_amount（USDT）。",
+            "hint": "Webhook 下单：quote_amount=USDT 名义金额；按策略币数下单请传 amount 并设 sizing_mode=base。",
         }
     )
 
@@ -3617,6 +3660,7 @@ def webhook():
             "_is_reversal": bool(op.get("_is_reversal")),
             "_resolved_reduce_only": ro,
             "used_quote_usdt": op.get("quote_amount"),
+            "used_base_amount": op.get("amount"),
             "sizing_mode": op.get("_sizing_mode"),
             "post_process": f"delayed_{int(WEBHOOK_POST_DELAY_SEC)}s",
         }
