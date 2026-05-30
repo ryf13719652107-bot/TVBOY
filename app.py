@@ -1172,8 +1172,33 @@ def _round_amount_to_precision(amount: float, mkt: dict | None) -> float:
     return float(int(amount)) if amount >= 1 else amount
 
 
+def _gate_effective_min_contracts(mkt: dict | None) -> float:
+    """Gate USDT 永续：order_size_min=0 且 enable_decimal 时最小张数 = quanto_multiplier（如 0.01）。"""
+    if not isinstance(mkt, dict):
+        return 1.0
+    info = mkt.get("info") or {}
+    enable_decimal = info.get("enable_decimal")
+    try:
+        order_size_min = float(info.get("order_size_min") or 0)
+    except (TypeError, ValueError):
+        order_size_min = 0.0
+    if order_size_min > 0:
+        return order_size_min
+    if enable_decimal is True or str(enable_decimal).lower() == "true":
+        for key in ("contractSize", "quanto_multiplier"):
+            raw = mkt.get(key) if key == "contractSize" else info.get(key)
+            if raw is not None:
+                try:
+                    q = float(raw)
+                    if q > 0:
+                        return q
+                except (TypeError, ValueError):
+                    pass
+    return 1.0
+
+
 def _get_min_contracts(exchange, mkt: dict | None) -> float:
-    """获取交易所最小合约张数。OKX 必须整张(≥1)；Gate 按市场 limits.amount.min。"""
+    """获取交易所最小合约张数。OKX 必须整张(≥1)；Gate 按市场 limits.amount.min 或 quanto 步长。"""
     _raw = None
     if isinstance(mkt, dict):
         _raw = mkt.get("limits", {}).get("amount", {}).get("min")
@@ -1184,7 +1209,9 @@ def _get_min_contracts(exchange, mkt: dict | None) -> float:
     if _exchange_id(exchange) == "okx":
         return max(1.0, float(int(min_val)))
     if _exchange_id(exchange) == "gate":
-        return min_val if min_val > 0 else 1.0
+        if min_val > 0:
+            return min_val
+        return _gate_effective_min_contracts(mkt)
     return max(min_val, 0.0) if min_val > 0 else 1.0
 
 
@@ -1592,7 +1619,7 @@ def _gate_fix_precision(exchange) -> None:
                         real_min = quanto
                     else:
                         real_min = 1.0
-                if old_min is not None and float(old_min) > real_min:
+                if old_min is None or float(old_min or 0) != real_min:
                     amt_limits["min"] = real_min
                     logger.debug(
                         "[Gate精度修正] %s limits.amount.min %s → %s",
@@ -2016,6 +2043,8 @@ def resolve_symbol(exchange, symbol: str) -> str:
     # 币种不存在时，强制刷新 markets 再试一次（处理新上线币种）
     logger.info("币种 %s 不存在，强制刷新 markets 重试", symbol)
     exchange.load_markets(True)  # True = 强制刷新，不用缓存
+    if ex_id == "gate":
+        _gate_fix_precision(exchange)
     if symbol in exchange.markets:
         return symbol
     for alt in candidates:
@@ -2309,11 +2338,14 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
-                    min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
+                    ref_price = market_price
+                    if (ref_price is None or ref_price <= 0) and base_amt > 0:
+                        ref_price = float(cost) / base_amt
+                    min_cost_usdt = min_contracts * ct * (ref_price or 0) if ct > 0 else 0
                     raise ValueError(
                         f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足最小 {min_contracts} 张）。"
                         f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
-                        f" 请将 quote_amount 调大。"
+                        f" 请将 quote_amount 调至至少 {min_cost_usdt:.2f}。"
                     )
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
@@ -2361,11 +2393,18 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             if _exchange_id(exchange) == "gate" and BINANCE_DEFAULT_TYPE == "future":
                 min_contracts = _get_min_contracts(exchange, mkt)
                 if order_amt < min_contracts:
-                    min_cost_usdt = min_contracts * ct * (market_price or 0) if ct > 0 else 0
+                    ref_price = market_price
+                    if (ref_price is None or ref_price <= 0) and ct > 0:
+                        try:
+                            tk = exchange.fetch_ticker(symbol)
+                            ref_price = float(tk.get("last") or tk.get("close") or 0)
+                        except Exception:
+                            ref_price = 0
+                    min_cost_usdt = min_contracts * ct * (ref_price or 0) if ct > 0 else 0
                     raise ValueError(
                         f"Gate 合约 {symbol} 下单张数取整后为 {order_amt}（不足最小 {min_contracts} 张）。"
                         f" 每张={ct} {base_coin}，最小下单≈{min_cost_usdt:.2f} USDT。"
-                        f" 请增加 amount 或改用 quote_amount。"
+                        f" 请增加 amount 或改用 quote_amount（至少 {min_cost_usdt:.2f} USDT）。"
                     )
             order = exchange.create_order(
                 symbol, "market", action, order_amt, market_price, params
