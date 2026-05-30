@@ -766,8 +766,8 @@ def _reversal_target_order_qty(
     payload: dict[str, Any], fallback_amount: float
 ) -> float:
     """
-    反手目标新仓数量：优先 abs(TV position_size)（成交后仓位）；
-    否则用 amount/contracts。Binance=标的币；OKX=张。
+    反手目标新仓数量（标的币，如 ETH）：优先 abs(TV position_size)；
+    否则用 amount/contracts。勿直接用 TV order.contracts（反手时常为平+开合计）。
     """
     ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
     if ps is not None and ps != 0:
@@ -781,17 +781,32 @@ def _reversal_total_order_qty(
     action: str,
     target_qty: float,
 ) -> float:
-    """反手下单量 = 现有持仓 + 目标新仓（与 fetch_positions / TV 同单位：币安=标的币，OKX=张）。"""
+    """
+    反手下单量（统一为标的币数量，如 ETH）：
+    - 交易所无仓：仅开 target_qty 新仓；
+    - 交易所有反向仓：平旧仓 + 开 target_qty（相加）。
+    Gate/OKX 的 fetch_positions.contracts 为「张」，会换算成标的币再加总。
+    """
     target = max(0.0, float(target_qty))
     pos_abs = _futures_net_position_abs(exchange, unified_symbol) or 0.0
     if pos_abs <= 0:
         return target
+    pos_base = float(pos_abs)
+    if _exchange_uses_contract_lots(exchange):
+        mkt = (
+            exchange.markets.get(unified_symbol)
+            if getattr(exchange, "markets", None)
+            else None
+        )
+        ct = float(mkt.get("contractSize") or 0) if isinstance(mkt, dict) else 0.0
+        if ct > 0:
+            pos_base = pos_abs * ct
     held = _futures_net_position_side(exchange, unified_symbol)
     act = (action or "").lower().strip()
     if held == "short" and act == "buy":
-        return pos_abs + target
+        return pos_base + target
     if held == "long" and act == "sell":
-        return pos_abs + target
+        return pos_base + target
     return target
 
 
@@ -2485,35 +2500,33 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 cost = DEFAULT_QUOTE_AMOUNT
                 amt = None
-    elif (
-        bool(payload.get("_is_reversal"))
-        and BINANCE_DEFAULT_TYPE == "future"
-        and (_futures_net_position_abs(exchange, symbol) or 0) > 0
-    ):
-        if amount is None:
-            if quote_amount is not None and market_price is not None and market_price > 0:
-                amount = float(quote_amount) / market_price
-                logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
-            else:
-                ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
-                if ps is not None and ps != 0:
-                    amount = abs(float(ps))
-                    logger.info("[反手] 未传 amount/quote_amount，由 position_size 推算≈%.4f", amount)
-                else:
-                    raise ValueError("反手信号缺少有效 amount/contracts/quote_amount/position_size，无法计算平仓+开仓总数量")
+    elif bool(payload.get("_is_reversal")) and BINANCE_DEFAULT_TYPE == "future":
+        ps = _parse_tv_numeric_field(payload, "position_size", "strategy.position_size")
+        if amount is None and quote_amount is not None and market_price is not None and market_price > 0:
+            amount = float(quote_amount) / market_price
+            logger.info("[反手] 未传 amount，由 quote_amount 按市价换算≈%.4f", amount)
+        elif amount is None and ps is not None and ps != 0:
+            amount = abs(float(ps))
+            logger.info("[反手] 未传 amount/quote_amount，由 position_size 推算≈%.4f", amount)
+        elif amount is None:
+            raise ValueError(
+                "反手信号缺少有效 amount / quote_amount / position_size，无法计算目标新仓"
+            )
         target_qty = _reversal_target_order_qty(payload, float(amount))
+        pos_abs = _futures_net_position_abs(exchange, symbol) or 0.0
         total_qty = _reversal_total_order_qty(
             exchange, symbol, action, target_qty
         )
-        unit = "张" if _exchange_uses_contract_lots(exchange) else "标的币"
+        base_coin = (symbol.split("/")[0] if "/" in symbol else "").strip() or "标的"
         logger.info(
-            "[反手] %s %s 目标新仓=%s%s 合计下单≈%s%s（含平旧仓）",
+            "[反手] %s %s 目标新仓=%s %s；交易所持仓=%s；合计下单=%s %s",
             symbol,
             action,
             target_qty,
-            unit,
+            base_coin,
+            pos_abs if _exchange_uses_contract_lots(exchange) else f"{pos_abs} {base_coin}",
             total_qty,
-            unit,
+            base_coin,
         )
         cost = None
         amt = _okx_linear_swap_amount_to_base(
@@ -2521,7 +2534,7 @@ def place_order(exchange, payload: dict[str, Any]) -> dict[str, Any]:
             symbol,
             total_qty,
             payload,
-            from_position_contracts=_exchange_uses_contract_lots(exchange),
+            from_position_contracts=False,
         )
     else:
         if quote_amount is not None:
