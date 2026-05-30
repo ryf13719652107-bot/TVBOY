@@ -178,7 +178,13 @@ class TpSlMonitor:
         account = next((a for a in accounts if a.get("id") == account_id), None)
         if not account:
             raise ValueError(f"账户未找到: {account_id or '未设置'}")
-        return get_exchange_for_account(account, purpose="tp-sl")
+        ex = get_exchange_for_account(account, purpose="tp-sl")
+        if getattr(ex, "id", "") == "gate":
+            from app import _gate_fix_precision, _gate_patch_create_order  # noqa: E402
+
+            _gate_fix_precision(ex)
+            _gate_patch_create_order(ex)
+        return ex
 
     def _resolve_ex_symbol(self, ex, symbol: str) -> str:
         """将统一格式符号转为交易所格式（如 ETH/USDT → ETH/USDT:USDT）。"""
@@ -253,7 +259,6 @@ class TpSlMonitor:
 
         tp_oid = None
         sl_oid = None
-        both_success = False
 
         # 先尝试挂 TP
         if tp_price > 0:
@@ -290,23 +295,44 @@ class TpSlMonitor:
                     logger.warning("[%s] 挂 SL stop 单也失败: %s", user_symbol, e2)
                     sl_oid = None
 
-        # 检查两个单是否都挂成了
-        if (tp_price <= 0 or tp_oid is not None) and (sl_price <= 0 or sl_oid is not None):
-            both_success = True
-        else:
-            # 有需要挂但没挂成的，撤销已挂的
-            logger.warning("[%s] TP/SL 未能全部挂出，撤销已挂出的订单", user_symbol)
+        # 检查两个单是否都挂成了；SL 优先：TP 失败时仍保留已挂成的 SL
+        tp_needed = tp_price > 0 and use_limit
+        sl_needed = sl_price > 0
+        tp_ok = (not tp_needed) or tp_oid is not None
+        sl_ok = (not sl_needed) or sl_oid is not None
+
+        if tp_ok and sl_ok:
+            pass
+        elif sl_ok and not tp_ok:
+            logger.warning(
+                "[%s] TP 未挂成，保留 SL id=%s（止损优先）",
+                user_symbol,
+                sl_oid,
+            )
             if tp_oid:
                 try:
                     ex.cancel_order(tp_oid, ex_symbol)
-                    logger.info("[%s] 已撤销未完成配对的 TP 单: %s", user_symbol, tp_oid)
-                except:
+                except Exception:
                     pass
-            if sl_oid:
+                tp_oid = None
+        elif tp_ok and not sl_ok:
+            logger.warning("[%s] SL 未挂成，撤销 TP id=%s", user_symbol, tp_oid)
+            if tp_oid:
                 try:
-                    ex.cancel_order(sl_oid, ex_symbol)
-                    logger.info("[%s] 已撤销未完成配对的 SL 单: %s", user_symbol, sl_oid)
-                except:
+                    ex.cancel_order(tp_oid, ex_symbol)
+                    logger.info("[%s] 已撤销 TP 单: %s", user_symbol, tp_oid)
+                except Exception:
+                    pass
+            tp_oid = None
+        else:
+            logger.warning("[%s] TP/SL 均未挂成", user_symbol)
+            for oid, label in ((tp_oid, "TP"), (sl_oid, "SL")):
+                if not oid:
+                    continue
+                try:
+                    ex.cancel_order(oid, ex_symbol)
+                    logger.info("[%s] 已撤销 %s 单: %s", user_symbol, label, oid)
+                except Exception:
                     pass
             tp_oid = None
             sl_oid = None
@@ -505,26 +531,45 @@ class TpSlMonitor:
     # ------------------------------------------------------------------
 
     def _fetch_position(self, ex, ex_symbol: str) -> tuple[float, str, float, float]:
-        """获取单个交易对的持仓。返回 (pos_size, pos_side, entry_price, mark_price)。"""
+        """获取单个交易对的持仓。返回 (pos_size, pos_side, entry_price, mark_price)。
+        Gate：ccxt 的 contracts 恒为正，方向须读 side 或 info.size 符号。"""
         try:
             positions = ex.fetch_positions([ex_symbol])
             if positions and len(positions) > 0:
                 pos = positions[0]
-                contracts = float(pos.get("contracts") or pos.get("info", {}).get("positionAmt") or 0)
-                pos_size = abs(contracts)
-                if contracts > 0:
-                    pos_side = "long"
-                elif contracts < 0:
-                    pos_side = "short"
-                else:
-                    side = str(pos.get("side", "")).lower()
-                    if side in ("long", "short"):
-                        pos_side = side
-                        pos_size = abs(float(pos.get("contracts") or pos.get("notional") or 0))
-                    else:
-                        pos_side = "flat"
-                entry_price = float(pos.get("entryPrice") or 0)
-                mark_price = float(pos.get("markPrice") or pos.get("mark") or 0)
+                info = pos.get("info") or {}
+                entry_price = float(pos.get("entryPrice") or info.get("entry_price") or 0)
+                mark_price = float(
+                    pos.get("markPrice") or pos.get("mark") or info.get("mark_price") or 0
+                )
+                pos_side = str(pos.get("side") or "").lower().strip()
+                pos_size = 0.0
+
+                if getattr(ex, "id", "") == "gate" and info.get("size") is not None:
+                    try:
+                        raw_sz = float(info["size"])
+                        pos_size = abs(raw_sz)
+                        if raw_sz > 0:
+                            pos_side = pos_side or "long"
+                        elif raw_sz < 0:
+                            pos_side = pos_side or "short"
+                    except (TypeError, ValueError):
+                        pass
+
+                if pos_size <= 0:
+                    contracts = float(
+                        pos.get("contracts") or info.get("positionAmt") or 0
+                    )
+                    pos_size = abs(contracts)
+                    if pos_side not in ("long", "short"):
+                        if contracts > 0:
+                            pos_side = "long"
+                        elif contracts < 0:
+                            pos_side = "short"
+
+                if pos_side not in ("long", "short"):
+                    pos_side = "flat"
+
                 return pos_size, pos_side, entry_price, mark_price
         except Exception as e:
             logger.debug("获取持仓失败 (%s): %s", ex_symbol, e)
