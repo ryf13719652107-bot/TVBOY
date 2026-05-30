@@ -1656,6 +1656,76 @@ def _gate_swap_order_needs_decimal_size(exchange, symbol: str) -> bool:
     return isinstance(mkt, dict) and bool(mkt.get("swap")) and _gate_market_enable_decimal(mkt)
 
 
+def _gate_order_is_trigger(order_type: str, params: dict[str, Any] | None) -> bool:
+    params = params or {}
+    otype = str(order_type or "").lower()
+    if "stop" in otype:
+        return True
+    return any(
+        params.get(k) is not None
+        for k in ("stopPrice", "triggerPrice", "stopLossPrice", "takeProfitPrice")
+    )
+
+
+def _gate_create_trigger_order_decimal_safe(
+    exchange,
+    symbol: str,
+    order_type: str,
+    side: str,
+    amount: float,
+    price=None,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Gate 永续小数张：条件单（止损/止盈触发），绕过 ccxt int(size)。"""
+    params = dict(params or {})
+    market = exchange.market(symbol)
+    amount_prec = str(exchange.amount_to_precision(symbol, amount))
+    signed_size = float(amount_prec) if str(side).lower() == "buy" else -float(amount_prec)
+    stop_price = (
+        params.get("stopLossPrice")
+        or params.get("stopPrice")
+        or params.get("triggerPrice")
+        or price
+    )
+    if stop_price is None:
+        raise ValueError("Gate 条件单缺少 stopPrice / stopLossPrice")
+    reduce_only = params.pop("reduceOnly", None)
+    time_in_force = params.pop("timeInForce", None)
+    otype = str(order_type or "").lower()
+    is_market = "market" in otype or str(order_type or "").lower() == "market"
+    rule = 1 if str(side).lower() == "buy" else 2
+    initial: dict[str, Any] = {
+        "contract": market["id"],
+        "size": signed_size,
+        "price": "0" if is_market else exchange.price_to_precision(symbol, price or stop_price),
+    }
+    if is_market:
+        initial["tif"] = "ioc"
+    elif time_in_force is not None:
+        initial["tif"] = exchange.handle_time_in_force({"timeInForce": time_in_force})
+    if reduce_only is not None:
+        initial["reduce_only"] = bool(reduce_only)
+    order_request: dict[str, Any] = {
+        "initial": initial,
+        "settle": market["settleId"],
+        "trigger": {
+            "price_type": int(params.pop("price_type", 0) or 0),
+            "price": exchange.price_to_precision(symbol, float(stop_price)),
+            "rule": rule,
+        },
+    }
+    logger.info(
+        "[Gate小数张-条件单] %s %s size=%s trigger=%s rule=%s",
+        symbol,
+        side,
+        signed_size,
+        order_request["trigger"]["price"],
+        rule,
+    )
+    response = exchange.privateFuturesPostSettlePriceOrders(order_request)
+    return exchange.parse_order(response, market)
+
+
 def _gate_create_order_decimal_safe(
     exchange,
     symbol: str,
@@ -1708,11 +1778,16 @@ def _gate_patch_create_order(exchange) -> None:
     _native_create_order = exchange.create_order
 
     def _create_order_patched(symbol, order_type, side, amount, price=None, params=None):
+        params = dict(params or {})
         if _gate_swap_order_needs_decimal_size(exchange, symbol):
+            if _gate_order_is_trigger(order_type, params):
+                return _gate_create_trigger_order_decimal_safe(
+                    exchange, symbol, order_type, side, amount, price, params
+                )
             return _gate_create_order_decimal_safe(
                 exchange, symbol, order_type, side, amount, price, params
             )
-        return _native_create_order(symbol, order_type, side, amount, price, params or {})
+        return _native_create_order(symbol, order_type, side, amount, price, params)
 
     exchange.create_order = _create_order_patched
     exchange._tvbot_gate_decimal_patch = True
