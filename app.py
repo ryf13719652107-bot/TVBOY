@@ -1641,6 +1641,83 @@ def _gate_fix_precision(exchange) -> None:
         logger.info("[Gate精度修正] 共修正 %s 个合约的 precision.amount / limits", fixed)
 
 
+def _gate_market_enable_decimal(mkt: dict | None) -> bool:
+    if not isinstance(mkt, dict):
+        return False
+    enable_decimal = (mkt.get("info") or {}).get("enable_decimal")
+    return enable_decimal is True or str(enable_decimal).lower() == "true"
+
+
+def _gate_swap_order_needs_decimal_size(exchange, symbol: str) -> bool:
+    """Gate USDT 永续 enable_decimal 时 ccxt 仍 int(size)，小数张会报错。"""
+    if _exchange_id(exchange) != "gate" or BINANCE_DEFAULT_TYPE != "future":
+        return False
+    mkt = exchange.markets.get(symbol) if getattr(exchange, "markets", None) else None
+    return isinstance(mkt, dict) and bool(mkt.get("swap")) and _gate_market_enable_decimal(mkt)
+
+
+def _gate_create_order_decimal_safe(
+    exchange,
+    symbol: str,
+    order_type: str,
+    side: str,
+    amount: float,
+    price=None,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    绕过 ccxt gate.create_order_request 里 int('-2.48') 的 bug，
+    直接向 Gate 永续 API 发送支持小数的 size。
+    """
+    params = dict(params or {})
+    market = exchange.market(symbol)
+    amount_prec = str(exchange.amount_to_precision(symbol, amount))
+    signed_size = float(amount_prec) if str(side).lower() == "buy" else -float(amount_prec)
+    reduce_only = params.pop("reduceOnly", None)
+    time_in_force = params.pop("timeInForce", None)
+    order_request: dict[str, Any] = {
+        "contract": market["id"],
+        "size": signed_size,
+    }
+    if not market.get("option"):
+        order_request["settle"] = market["settleId"]
+    if order_type == "market":
+        order_request["price"] = "0"
+        order_request["tif"] = "ioc"
+    else:
+        order_request["price"] = exchange.price_to_precision(symbol, price or 0)
+        if time_in_force is not None:
+            order_request["tif"] = exchange.handle_time_in_force({"timeInForce": time_in_force})
+    if reduce_only is not None:
+        order_request["reduce_only"] = bool(reduce_only)
+    logger.info(
+        "[Gate小数张] %s %s size=%s (ccxt amount=%s)",
+        symbol,
+        side,
+        signed_size,
+        amount_prec,
+    )
+    response = exchange.privateFuturesPostSettleOrders(order_request)
+    return exchange.parse_order(response, market)
+
+
+def _gate_patch_create_order(exchange) -> None:
+    """Gate enable_decimal 合约：包装 create_order，避免 ccxt int(size) 崩溃。"""
+    if getattr(exchange, "_tvbot_gate_decimal_patch", False):
+        return
+    _native_create_order = exchange.create_order
+
+    def _create_order_patched(symbol, order_type, side, amount, price=None, params=None):
+        if _gate_swap_order_needs_decimal_size(exchange, symbol):
+            return _gate_create_order_decimal_safe(
+                exchange, symbol, order_type, side, amount, price, params
+            )
+        return _native_create_order(symbol, order_type, side, amount, price, params or {})
+
+    exchange.create_order = _create_order_patched
+    exchange._tvbot_gate_decimal_patch = True
+
+
 def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default"):
     """
     按账户创建/复用 ccxt 实例（binance / okx / hyperliquid）。
@@ -1749,6 +1826,7 @@ def get_exchange_for_account(account: dict[str, Any], *, purpose: str = "default
         )
         ex.options["adjustForTimeDifference"] = True
         _gate_fix_precision(ex)
+        _gate_patch_create_order(ex)
     else:
         raise ValueError("暂仅支持 binance / okx / hyperliquid / gate")
     with _exchange_cache_lock:
